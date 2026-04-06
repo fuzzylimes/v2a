@@ -1,0 +1,14 @@
+[project]
+name = "v2a"
+version = "0.1.0"
+description = "VobSub to ASS converter"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+v2a = "v2a.v2a:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
