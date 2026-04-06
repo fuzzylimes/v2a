@@ -3,12 +3,19 @@ name = "v2a"
 version = "0.1.0"
 description = "VobSub to ASS converter"
 readme = "README.md"
-requires-python = ">=3.11"
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+    "pytesseract>=0.3",
+    "Pillow>=10.0",
+    "pysubs2>=1.6",
+]
 
 [project.scripts]
-v2a = "v2a.v2a:main"
+v2a = "v2a.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
