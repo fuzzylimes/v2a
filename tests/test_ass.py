@@ -21,7 +21,7 @@ from v2a.ass import (
 
 class TestAlignmentFromArea:
     """
-    DVD frame is 720×576 divided into a 3×3 grid.
+    DVD frame is 720x576 divided into a 3x3 grid.
     Column thresholds: left < 240, center < 480, right >= 480.
     Row thresholds:    top  < 192, mid   < 384, bot  >= 384.
 
@@ -131,48 +131,51 @@ class TestBuildAss:
 
     def test_writes_ass_file(self, tmp_path):
         entries = [(1000, 0x1000)]
-        texts   = ["Hello world"]
+        texts = ["Hello world"]
         _, out = self._run(entries, texts, [_spu(end_ms=2000)], tmp_path)
         assert out.exists()
 
     def test_returns_event_count(self, tmp_path):
         entries = [(1000, 0x1000), (5000, 0x2000)]
-        texts   = ["Line one", "Line two"]
-        count, _ = self._run(entries, texts, [_spu(2000), _spu(1000)], tmp_path)
+        texts = ["Line one", "Line two"]
+        count, _ = self._run(
+            entries, texts, [_spu(2000), _spu(1000)], tmp_path)
         assert count == 2
 
     def test_empty_text_entries_skipped(self, tmp_path):
         entries = [(1000, 0x1000), (3000, 0x2000)]
-        texts   = ["", "Visible line"]
-        count, _ = self._run(entries, texts, [_spu(2000), _spu(1000)], tmp_path)
+        texts = ["", "Visible line"]
+        count, _ = self._run(
+            entries, texts, [_spu(2000), _spu(1000)], tmp_path)
         assert count == 1
 
     def test_end_time_from_spu(self, tmp_path):
         entries = [(1000, 0x1000)]
-        texts   = ["Hello"]
+        texts = ["Hello"]
         _, out = self._run(entries, texts, [_spu(end_ms=2500)], tmp_path)
         subs = pysubs2.load(str(out))
         assert subs[0].start == 1000
-        assert subs[0].end   == 3500   # 1000 + 2500
+        assert subs[0].end == 3500   # 1000 + 2500
 
     def test_end_time_fallback_to_next_start(self, tmp_path):
         # No SPU end_ms; should use next start - 100
         entries = [(1000, 0x1000), (5000, 0x2000)]
-        texts   = ["First", "Second"]
-        _, out = self._run(entries, texts, [_spu(end_ms=None), _spu(end_ms=1000)], tmp_path)
+        texts = ["First", "Second"]
+        _, out = self._run(entries, texts, [_spu(
+            end_ms=None), _spu(end_ms=1000)], tmp_path)
         subs = pysubs2.load(str(out))
         assert subs[0].end == 4900   # 5000 - 100
 
     def test_end_time_last_entry_fallback(self, tmp_path):
         entries = [(1000, 0x1000)]
-        texts   = ["Only line"]
+        texts = ["Only line"]
         _, out = self._run(entries, texts, [_spu(end_ms=None)], tmp_path)
         subs = pysubs2.load(str(out))
         assert subs[0].end == 4000   # 1000 + LAST_FALLBACK_MS (3000)
 
     def test_max_cap_applied(self, tmp_path):
         entries = [(0, 0x1000)]
-        texts   = ["Too long"]
+        texts = ["Too long"]
         # SPU claims 60 seconds — should be capped at MAX_SUBTITLE_MS
         _, out = self._run(entries, texts, [_spu(end_ms=60_000)], tmp_path)
         subs = pysubs2.load(str(out))
@@ -180,7 +183,7 @@ class TestBuildAss:
 
     def test_min_floor_applied(self, tmp_path):
         entries = [(1000, 0x1000)]
-        texts   = ["Flash"]
+        texts = ["Flash"]
         # SPU claims 10 ms — should be raised to MIN_SUBTITLE_MS
         _, out = self._run(entries, texts, [_spu(end_ms=10)], tmp_path)
         subs = pysubs2.load(str(out))
@@ -189,31 +192,33 @@ class TestBuildAss:
     def test_bottom_center_has_no_an_tag(self, tmp_path):
         # Bottom-center (an=2) should NOT inject an override tag
         entries = [(1000, 0x1000)]
-        texts   = ["Normal sub"]
+        texts = ["Normal sub"]
         # y centroid ≈ 515 (bot), x centroid ≈ 360 (center) → an=2
-        _, out = self._run(entries, texts, [_spu(end_ms=2000, x1=200, x2=520, y1=500, y2=530)], tmp_path)
+        _, out = self._run(entries, texts, [_spu(
+            end_ms=2000, x1=200, x2=520, y1=500, y2=530)], tmp_path)
         subs = pysubs2.load(str(out))
         assert "{\\an" not in subs[0].text
 
     def test_sign_has_an_tag(self, tmp_path):
         # Top-center (an=8) should inject {\an8}
         entries = [(1000, 0x1000)]
-        texts   = ["Sign text"]
+        texts = ["Sign text"]
         # y centroid ≈ 50 (top), x centroid ≈ 360 (center) → an=8
-        _, out = self._run(entries, texts, [_spu(end_ms=2000, x1=200, x2=520, y1=0, y2=100)], tmp_path)
+        _, out = self._run(entries, texts, [_spu(
+            end_ms=2000, x1=200, x2=520, y1=0, y2=100)], tmp_path)
         subs = pysubs2.load(str(out))
         assert subs[0].text.startswith("{\\an8}")
 
     def test_newlines_converted_to_ass_format(self, tmp_path):
         entries = [(1000, 0x1000)]
-        texts   = ["Line one\nLine two"]
+        texts = ["Line one\nLine two"]
         _, out = self._run(entries, texts, [_spu(end_ms=2000)], tmp_path)
         subs = pysubs2.load(str(out))
         assert "\\N" in subs[0].text
 
     def test_default_style_is_set(self, tmp_path):
         entries = [(1000, 0x1000)]
-        texts   = ["Hello"]
+        texts = ["Hello"]
         _, out = self._run(entries, texts, [_spu(end_ms=2000)], tmp_path)
         subs = pysubs2.load(str(out))
         assert "Default" in subs.styles

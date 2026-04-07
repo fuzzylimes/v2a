@@ -8,13 +8,13 @@ from .spu import read_spu_at
 
 # A subtitle running longer than this almost certainly has a bad or missing
 # STP_DSP end-time. Cap it to prevent text freezing across scene breaks.
-MAX_SUBTITLE_MS  = 8_000
-MIN_SUBTITLE_MS  =   500
+MAX_SUBTITLE_MS = 8_000
+MIN_SUBTITLE_MS = 500
 LAST_FALLBACK_MS = 3_000   # used only for the very last entry when STP_DSP is absent
 
 # DVD frame dimensions used for zone-based alignment detection.
-# PAL is 720×576; NTSC is 720×480. The PAL thresholds work acceptably for both.
-DVD_WIDTH  = 720
+# PAL is 720x576; NTSC is 720x480. The PAL thresholds work acceptably for both.
+DVD_WIDTH = 720
 DVD_HEIGHT = 576
 
 
@@ -26,20 +26,20 @@ def make_style() -> pysubs2.SSAStyle:
     pysubs2.Color(r, g, b, a) — alpha: 0 = fully opaque, 255 = fully transparent.
     """
     s = pysubs2.SSAStyle()
-    s.fontname       = "Arial"
-    s.fontsize       = 52
-    s.primarycolor   = pysubs2.Color(255, 255, 255,   0)   # white text
+    s.fontname = "Arial"
+    s.fontsize = 52
+    s.primarycolor = pysubs2.Color(255, 255, 255,   0)   # white text
     s.secondarycolor = pysubs2.Color(255, 255, 255,   0)
-    s.outlinecolor   = pysubs2.Color(  0,   0,   0,   0)   # black border
-    s.backcolor      = pysubs2.Color(  0,   0,   0, 160)   # soft shadow
-    s.bold           = False
-    s.italic         = False
-    s.outline        = 2.5
-    s.shadow         = 1.5
-    s.alignment      = pysubs2.Alignment.BOTTOM_CENTER   # overridden per-event for signs
-    s.marginl        = 40
-    s.marginr        = 40
-    s.marginv        = 30
+    s.outlinecolor = pysubs2.Color(0,   0,   0,   0)   # black border
+    s.backcolor = pysubs2.Color(0,   0,   0, 160)   # soft shadow
+    s.bold = False
+    s.italic = False
+    s.outline = 2.5
+    s.shadow = 1.5
+    s.alignment = pysubs2.Alignment.BOTTOM_CENTER   # overridden per-event for signs
+    s.marginl = 40
+    s.marginr = 40
+    s.marginv = 30
     return s
 
 
@@ -47,7 +47,7 @@ def alignment_from_area(x1, y1, x2, y2) -> int:
     """
     Map a subtitle bounding box to an ASS \\an numpad value (1–9).
 
-    The DVD frame is divided into a 3×3 zone grid. Normal dialogue sits in the
+    The DVD frame is divided into a 3x3 zone grid. Normal dialogue sits in the
     bottom zone and maps to \\an2 (bottom-center). Signs and forced subs in the
     top or middle zones get a more appropriate anchor point.
     """
@@ -117,12 +117,13 @@ def build_ass(
         end_ms = min(end_ms, start_ms + MAX_SUBTITLE_MS)
         end_ms = max(end_ms, start_ms + MIN_SUBTITLE_MS)
 
-        an   = alignment_from_area(spu["x1"], spu["y1"], spu["x2"], spu["y2"])
+        an = alignment_from_area(spu["x1"], spu["y1"], spu["x2"], spu["y2"])
         body = text.replace("\n", "\\N")
         if an != 2:
             body = f"{{\\an{an}}}{body}"
 
-        subs.events.append(pysubs2.SSAEvent(start=start_ms, end=end_ms, text=body))
+        subs.events.append(pysubs2.SSAEvent(
+            start=start_ms, end=end_ms, text=body))
 
     subs.save(str(output_path))
     return len(subs.events)

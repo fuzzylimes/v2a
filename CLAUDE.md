@@ -45,7 +45,7 @@ All source lives in `src/v2a/`. Each module has a single responsibility:
 | `cli.py` | Entry point. Parses args, checks system deps, orchestrates `process_file()` for single or batch mode. |
 | `tracks.py` | Calls `mkvmerge --identify` (JSON output) to list VobSub tracks; handles interactive/batch track selection. |
 | `extraction.py` | Runs `mkvextract` to produce `subs.idx`/`subs.sub`; parses the `.idx` text file for `(start_ms, filepos)` pairs; runs `ffmpeg` to render bitmaps as numbered PNGs. |
-| `ocr.py` | Preprocesses each PNG (flatten alpha → grayscale → 3× upscale → contrast boost) then calls Tesseract (`--psm 6 --oem 3`). |
+| `ocr.py` | Preprocesses each PNG (flatten alpha → grayscale → 3x upscale → contrast boost) then calls Tesseract (`--psm 6 --oem 3`). |
 | `spu.py` | Binary parser for MPEG-PS `private_stream_1` packets in the `.sub` file. Extracts `STP_DSP` end-time offset and `SET_DAREA` bounding box from each SPU control sequence. |
 | `ass.py` | Assembles a `pysubs2.SSAFile` from timing entries, OCR texts, and SPU data. Handles end-time priority logic and maps bounding boxes to ASS `\an` alignment tags. |
 
@@ -59,7 +59,7 @@ All source lives in `src/v2a/`. Each module has a single responsibility:
 
 ### Sign positioning
 
-`alignment_from_area()` divides the DVD frame (720×576) into a 3×3 zone grid and maps each subtitle's bounding-box center to an ASS `\an` numpad value. Bottom-center (normal dialogue) gets `\an2` and no override tag is written; all other zones get an explicit `{\an#}` tag prepended.
+`alignment_from_area()` divides the DVD frame (720x576) into a 3x3 zone grid and maps each subtitle's bounding-box center to an ASS `\an` numpad value. Bottom-center (normal dialogue) gets `\an2` and no override tag is written; all other zones get an explicit `{\an#}` tag prepended.
 
 ### Track selection convention
 
