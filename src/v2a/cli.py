@@ -29,11 +29,11 @@ from pathlib import Path
 
 def check_deps() -> None:
     """Abort with a clear message if any required system tool or Python package is missing."""
-    missing = [t for t in ("mkvmerge", "mkvextract", "ffmpeg", "tesseract")
+    missing = [t for t in ("mkvmerge", "mkvextract", "tesseract")
                if not shutil.which(t)]
     if missing:
         print(f"[error] Missing system tools: {', '.join(missing)}")
-        print("        Run: sudo apt install mkvtoolnix ffmpeg tesseract-ocr")
+        print("        Run: sudo apt install mkvtoolnix tesseract-ocr")
         sys.exit(1)
     try:
         import pytesseract  # noqa: F401
@@ -45,7 +45,7 @@ def check_deps() -> None:
         sys.exit(1)
 
 
-def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool) -> bool:
+def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool, keep_frames: bool = False) -> bool:
     """
     Run the full pipeline on a single MKV file.
 
@@ -96,11 +96,11 @@ def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool
             return False
         print(f"        {len(entries)} subtitle entries.")
 
-        print("  [3/4] Rendering subtitle bitmaps via ffmpeg...")
+        print("  [3/4] Decoding subtitle bitmaps...")
         try:
-            frames = extract_frames(idx_path, tmp_dir)
-        except subprocess.CalledProcessError as exc:
-            print(f"  [error] ffmpeg failed: {exc}")
+            frames = extract_frames(idx_path, sub_path, entries, tmp_dir)
+        except Exception as exc:
+            print(f"  [error] Bitmap decoding failed: {exc}")
             return False
         print(f"        {len(frames)} frames rendered.")
 
@@ -116,6 +116,14 @@ def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool
 
         # sub_path must be read before the tempdir is cleaned up
         count = build_ass(entries, texts, sub_path, out_path)
+
+        if keep_frames:
+            import shutil as _shutil
+            dest = out_path.parent / (out_path.stem + ".frames")
+            if dest.exists():
+                _shutil.rmtree(dest)
+            _shutil.copytree(tmp_dir / "frames", dest)
+            print(f"  Frames saved → {dest}")
 
     print(f"  Done  →  {out_path.name}  ({count} events written)")
     return True
@@ -141,6 +149,10 @@ def main() -> None:
         "--force", action="store_true",
         help="Re-process and overwrite existing .ass files (default: skip).",
     )
+    parser.add_argument(
+        "--keep-frames", action="store_true",
+        help="Save decoded subtitle frames to a frames/ subdirectory next to the output for inspection.",
+    )
     args = parser.parse_args()
 
     if args.dir:
@@ -155,7 +167,7 @@ def main() -> None:
         print(f"Found {len(mkv_files)} MKV file(s) in {folder.name}/")
         ok = skip = 0
         for mkv in mkv_files:
-            if process_file(mkv, args.language, batch=True, force=args.force):
+            if process_file(mkv, args.language, batch=True, force=args.force, keep_frames=args.keep_frames):
                 ok += 1
             else:
                 skip += 1
@@ -168,7 +180,7 @@ def main() -> None:
         if not mkv_path.exists():
             print(f"[error] File not found: {mkv_path}")
             sys.exit(1)
-        process_file(mkv_path, args.language, batch=False, force=args.force)
+        process_file(mkv_path, args.language, batch=False, force=args.force, keep_frames=args.keep_frames)
 
 
 if __name__ == "__main__":

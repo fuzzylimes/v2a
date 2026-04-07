@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from v2a.spu import _skip_ps_header, parse_spu, read_spu_at
+from v2a.spu import _extract_bd_payload, parse_spu, read_spu_at
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -61,7 +61,7 @@ def _make_ps_packet(spu_payload: bytes, pes_hdr_extra: bytes = b'') -> bytes:
 
     Structure:
       00 00 01 BD  — start code + stream id
-      2 bytes      — PES packet length (unused by our parser)
+      2 bytes      — PES packet length (bytes after this 6-byte prefix)
       2 bytes      — PES flags
       1 byte       — PES header data length N
       N bytes      — optional PES header fields
@@ -69,45 +69,56 @@ def _make_ps_packet(spu_payload: bytes, pes_hdr_extra: bytes = b'') -> bytes:
       payload...
     """
     N = len(pes_hdr_extra)
-    header = (
-        b'\x00\x00\x01\xbd'
-        + b'\x00\x00'          # PES packet length (ignored)
-        + b'\x80\x00'          # PES flags
-        + bytes([N])           # PES header data length
-        + pes_hdr_extra        # optional fields
-        + b'\x20'              # sub-stream id
+    # PES length = flags(2) + hdr_len_byte(1) + N + sub_stream_id(1) + payload
+    pes_len = 2 + 1 + N + 1 + len(spu_payload)
+    body = (
+        b'\x80\x00'          # PES flags
+        + bytes([N])         # PES header data length
+        + pes_hdr_extra      # optional fields
+        + b'\x20'            # sub-stream id
+        + spu_payload
     )
-    return header + spu_payload
+    return b'\x00\x00\x01\xbd' + struct.pack('>H', pes_len) + body
+
+
+def _make_ps_pack(spu_payload: bytes) -> bytes:
+    """
+    Wrap an SPU payload in a minimal MPEG-2 Pack Header + private_stream_1 packet.
+    The Pack Header is the structure the .sub file uses; .idx filepos entries
+    point to the start of a Pack Header, not directly to the BD packet.
+    """
+    pack_header = (
+        b'\x00\x00\x01\xba'        # start code
+        + b'\x44\x00\x04\x00\x04\x01'  # SCR (6 bytes, values don't matter)
+        + b'\x01\x89\xc3'          # mux_rate (3 bytes)
+        + b'\xf8'                  # stuffing_length byte (0 stuffing)
+    )
+    return pack_header + _make_ps_packet(spu_payload)
 
 
 # ---------------------------------------------------------------------------
-# _skip_ps_header
+# _extract_bd_payload
 # ---------------------------------------------------------------------------
 
-class TestSkipPsHeader:
-    def test_standard_packet_no_optional_fields(self):
-        # N=0 → spu starts at byte 10
+class TestExtractBdPayload:
+    def test_standard_no_optional_fields(self):
+        # N=0: payload starts after flags(2) + hdr_len(1) + sub_stream_id(1) = byte 4
         packet = _make_ps_packet(b'\xAB\xCD', pes_hdr_extra=b'')
-        assert _skip_ps_header(packet) == 10
+        # pes_data is everything after the 6-byte prefix
+        pes_data = packet[6:]
+        assert _extract_bd_payload(pes_data) == b'\xAB\xCD'
 
-    def test_packet_with_optional_fields(self):
-        # N=5 → spu starts at byte 15
+    def test_with_optional_fields(self):
+        # N=5: sub_stream_id is at byte 8, payload starts at byte 9
         packet = _make_ps_packet(b'\xAB\xCD', pes_hdr_extra=b'\x00' * 5)
-        assert _skip_ps_header(packet) == 15
+        pes_data = packet[6:]
+        assert _extract_bd_payload(pes_data) == b'\xAB\xCD'
 
-    def test_wrong_start_code_returns_zero(self):
-        bad = b'\x00\x00\x02\xbd' + b'\x00' * 10
-        assert _skip_ps_header(bad) == 0
+    def test_too_short_returns_empty(self):
+        assert _extract_bd_payload(b'\x80\x00') == b''
 
-    def test_wrong_stream_id_returns_zero(self):
-        bad = b'\x00\x00\x01\xe0' + b'\x00' * 10   # video stream, not 0xBD
-        assert _skip_ps_header(bad) == 0
-
-    def test_too_short_returns_zero(self):
-        assert _skip_ps_header(b'\x00\x00\x01') == 0
-
-    def test_empty_returns_zero(self):
-        assert _skip_ps_header(b'') == 0
+    def test_empty_returns_empty(self):
+        assert _extract_bd_payload(b'') == b''
 
 
 # ---------------------------------------------------------------------------
@@ -194,14 +205,26 @@ class TestParseSpu:
 # ---------------------------------------------------------------------------
 
 class TestReadSpuAt:
-    def test_reads_correct_offset(self, tmp_path):
+    def test_reads_bd_packet_at_offset(self, tmp_path):
+        """filepos points directly to a BD packet (no pack header)."""
         spu_payload = _make_spu(delay_units=90, x1=10, x2=100, y1=400, y2=450)
         packet = _make_ps_packet(spu_payload)
-        # Write 512 bytes of garbage, then the packet at offset 512
         sub_file = tmp_path / "subs.sub"
         sub_file.write_bytes(b'\x00' * 512 + packet)
 
         result = read_spu_at(sub_file, filepos=512)
+        assert result['end_ms'] == int(90 * 1024 / 90)
+        assert result['x1'] == 10
+        assert result['x2'] == 100
+
+    def test_reads_through_pack_header(self, tmp_path):
+        """filepos points to a Pack Header (BA), as real .sub files use."""
+        spu_payload = _make_spu(delay_units=90, x1=10, x2=100, y1=400, y2=450)
+        pack = _make_ps_pack(spu_payload)
+        sub_file = tmp_path / "subs.sub"
+        sub_file.write_bytes(pack)
+
+        result = read_spu_at(sub_file, filepos=0)
         assert result['end_ms'] == int(90 * 1024 / 90)
         assert result['x1'] == 10
         assert result['x2'] == 100

@@ -127,36 +127,39 @@ class TestExtractFrames:
             paths.append(p)
         return paths
 
-    def test_calls_ffmpeg_with_idx_path(self, tmp_path):
+    def test_produces_one_frame_per_entry(self, tmp_path):
         idx = tmp_path / "subs.idx"
-        idx.touch()
+        idx.write_text("palette: 000000, ffffff, 808080, 000000\n")
+        sub = tmp_path / "subs.sub"
+        sub.write_bytes(b'')
+        entries = [(1000, 0), (2000, 0), (3000, 0)]
 
-        def fake_run(cmd, **kwargs):
-            # Simulate ffmpeg by creating the output directory and files
-            (tmp_path / "frames").mkdir(exist_ok=True)
-            (tmp_path / "frames" / "frame_000001.png").write_bytes(b'')
-            return MagicMock()
+        fake_meta = dict(end_ms=500, x1=10, y1=20, x2=50, y2=40)
+        fake_img = MagicMock()
 
-        with patch("v2a.extraction.subprocess.run", side_effect=fake_run) as mock_run:
-            frames = extract_frames(idx, tmp_path)
+        with patch("v2a.spu.read_spu_bytes", return_value=b'\x00' * 10), \
+             patch("v2a.spu.parse_spu", return_value=fake_meta), \
+             patch("v2a.spu.decode_spu_image", return_value=fake_img):
+            frames = extract_frames(idx, sub, entries, tmp_path)
 
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "ffmpeg"
-        assert str(idx) in cmd
-
-    def test_returns_sorted_frame_paths(self, tmp_path):
-        idx = tmp_path / "subs.idx"
-        idx.touch()
-
-        def fake_run(cmd, **kwargs):
-            frames_dir = tmp_path / "frames"
-            frames_dir.mkdir(exist_ok=True)
-            for i in [3, 1, 2]:
-                (frames_dir / f"frame_{i:06d}.png").write_bytes(b'')
-
-        with patch("v2a.extraction.subprocess.run", side_effect=fake_run):
-            frames = extract_frames(idx, tmp_path)
-
-        names = [f.name for f in frames]
-        assert names == sorted(names)
         assert len(frames) == 3
+        assert fake_img.save.call_count == 3
+
+    def test_blank_frame_for_missing_bbox(self, tmp_path):
+        idx = tmp_path / "subs.idx"
+        idx.write_text("palette: 000000, ffffff, 808080, 000000\n")
+        sub = tmp_path / "subs.sub"
+        sub.write_bytes(b'')
+        entries = [(1000, 0)]
+
+        no_bbox = dict(end_ms=None, x1=None, y1=None, x2=None, y2=None)
+        fake_img = MagicMock()
+
+        with patch("v2a.spu.read_spu_bytes", return_value=b'\x00' * 10), \
+             patch("v2a.spu.parse_spu", return_value=no_bbox), \
+             patch("v2a.spu.decode_spu_image") as mock_decode, \
+             patch("PIL.Image.new", return_value=fake_img):
+            frames = extract_frames(idx, sub, entries, tmp_path)
+
+        assert len(frames) == 1
+        mock_decode.assert_not_called()

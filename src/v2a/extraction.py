@@ -44,21 +44,54 @@ def parse_idx(idx_path: Path) -> list[tuple[int, int]]:
     return entries
 
 
-def extract_frames(idx_path: Path, out_dir: Path) -> list[Path]:
-    """
-    Render each VobSub bitmap to a numbered PNG using ffmpeg's VobSub demuxer.
+def _parse_palette(idx_path: Path) -> list[tuple[int, int, int]]:
+    """Extract the 16-colour RGB palette from the .idx file's 'palette:' line."""
+    with open(idx_path) as f:
+        for line in f:
+            if line.startswith('palette:'):
+                parts = line.split(':', 1)[1].strip().split(',')
+                result = []
+                for p in parts:
+                    p = p.strip()
+                    if len(p) == 6:
+                        result.append((int(p[0:2], 16), int(p[2:4], 16), int(p[4:6], 16)))
+                return result
+    return [(i * 17, i * 17, i * 17) for i in range(16)]
 
-    Output files are written to out_dir/frames/ as frame_000001.png, etc.
+
+def extract_frames(
+    idx_path: Path,
+    sub_path: Path,
+    entries: list[tuple[int, int]],
+    out_dir: Path,
+) -> list[Path]:
     """
+    Render each VobSub bitmap to a numbered PNG by decoding the SPU binary data.
+
+    Returns one Path per entry (entries whose bounding box is missing get a
+    blank 4×4 image so the frame/entry lists stay aligned).
+    """
+    from PIL import Image
+    from .spu import read_spu_bytes, decode_spu_image, parse_spu
+
     frames_dir = out_dir / "frames"
     frames_dir.mkdir()
-    subprocess.run(
-        [
-            "ffmpeg", "-loglevel", "error",
-            "-i", str(idx_path),
-            "-fps_mode", "passthrough",
-            str(frames_dir / "frame_%06d.png"),
-        ],
-        check=True, capture_output=True,
-    )
-    return sorted(frames_dir.glob("frame_*.png"))
+    palette = _parse_palette(idx_path)
+    frames = []
+    for i, (_, filepos) in enumerate(entries, 1):
+        spu_data = read_spu_bytes(sub_path, filepos)
+        if i == 1:
+            meta1 = parse_spu(spu_data)
+            print(f"  [debug] entry 1: spu_data={len(spu_data)}b  "
+                  f"bbox=({meta1['x1']},{meta1['y1']})-({meta1['x2']},{meta1['y2']})  "
+                  f"end_ms={meta1['end_ms']}")
+        meta = parse_spu(spu_data)
+        path = frames_dir / f"frame_{i:06d}.png"
+        if None not in (meta['x1'], meta['y1'], meta['x2'], meta['y2']):
+            img = decode_spu_image(
+                spu_data, meta['x1'], meta['y1'], meta['x2'], meta['y2'], palette)
+        else:
+            img = Image.new('RGBA', (4, 4), (0, 0, 0, 0))
+        img.save(path)
+        frames.append(path)
+    return frames
