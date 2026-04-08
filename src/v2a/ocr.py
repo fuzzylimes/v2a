@@ -14,15 +14,19 @@ def preprocess(img: Image.Image) -> Image.Image:
     Steps:
       1. Flatten transparent pixels to black (VobSub PNGs have an alpha channel).
       2. Convert to grayscale.
-      3. Upscale 3x with LANCZOS — DVD subtitle strips (~720x60 px) are too small
+      3. Sharpen edges before upscaling to give LANCZOS better boundaries to work with.
+      4. Upscale 3x with LANCZOS — DVD subtitle strips (~720x60 px) are too small
          for reliable Tesseract recognition at native resolution.
-      4. Boost contrast to sharpen the white text / black outline boundary.
+      5. Boost contrast then binarize to pure black/white — Tesseract is trained on
+         binary images and performs best without intermediate gray values.
     """
     bg = Image.new("RGBA", img.size, (0, 0, 0, 255))
     flat = Image.alpha_composite(bg, img.convert("RGBA")).convert("L")
     w, h = flat.size
+    flat = ImageEnhance.Sharpness(flat).enhance(2.0)
     flat = flat.resize((w * 3, h * 3), Image.LANCZOS)
-    return ImageEnhance.Contrast(flat).enhance(1.8)
+    enhanced = ImageEnhance.Contrast(flat).enhance(1.8)
+    return enhanced.point(lambda x: 255 if x > 128 else 0)
 
 
 def ocr_frames(frame_paths: list[Path]) -> list[str]:

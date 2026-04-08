@@ -66,19 +66,30 @@ v2a -d /path/to/season/ -l eng
 
 Processes every `.mkv` in the directory. The `-l` flag is strongly recommended in batch mode to avoid interactive prompts.
 
+### Batch — process an entire library recursively
+
+```bash
+v2a -d /path/to/shows/ -r -l eng
+```
+
+Walks all subdirectories under the given folder. MKVs that already have a `.ass` file are skipped automatically.
+
 ## CLI Reference
 
 ```
 v2a FILE
-v2a -d DIR [-l LANG] [--force]
+v2a -d DIR [-r] [-l LANG] [--force] [--keep-frames] [--verbose]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `FILE` | Single `.mkv` file to process |
 | `-d`, `--dir DIR` | Process all `.mkv` files in a directory |
+| `-r`, `--recursive` | Recurse into subdirectories when using `-d` (e.g. a full show library) |
 | `-l`, `--language LANG` | Language code for auto track selection (e.g. `eng`, `en`) |
 | `--force` | Re-process and overwrite existing `.ass` files (default: skip) |
+| `--keep-frames` | Save decoded subtitle bitmaps to a `.frames/` folder next to the output (useful for inspection) |
+| `--verbose` | Print bounding-box coordinates and alignment tag for each subtitle (useful for debugging positioning) |
 
 `FILE` and `-d`/`--dir` are mutually exclusive; one is required.
 
@@ -100,4 +111,4 @@ Jellyfin automatically picks up external subtitle files in this format.
 - **End times:** Derived from the SPU packet's own stop timestamp when available; falls back to next-subtitle-start minus 100 ms, then a 3-second fixed duration. A hard cap of 8 seconds prevents frozen text across scene breaks.
 - **Sign positioning:** Non-bottom-center subtitles (signs, titles) get an `\an` override tag based on their position in the DVD frame, placing them in the correct screen zone.
 - **OCR quality:** Tesseract accuracy can degrade on italicized or stylized fonts. A review pass is recommended before treating the output as final.
-- **Batch scope:** `-d` processes one flat folder. There is no recursive directory walking.
+- **Batch scope:** `-d` processes a flat folder by default. Add `-r`/`--recursive` to walk all subdirectories, e.g. when pointing at a full show library.

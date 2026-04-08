@@ -147,6 +147,10 @@ def main() -> None:
              "Recommended when using -d with files that have multiple VobSub tracks.",
     )
     parser.add_argument(
+        "-r", "--recursive", action="store_true",
+        help="Recurse into subdirectories when using -d/--dir (e.g. a full show library).",
+    )
+    parser.add_argument(
         "--force", action="store_true",
         help="Re-process and overwrite existing .ass files (default: skip).",
     )
@@ -165,7 +169,7 @@ def main() -> None:
         if not folder.is_dir():
             print(f"[error] Not a directory: {folder}")
             sys.exit(1)
-        mkv_files = sorted(folder.glob("*.mkv"))
+        mkv_files = sorted(folder.rglob("*.mkv") if args.recursive else folder.glob("*.mkv"))
         if not mkv_files:
             print(f"[error] No .mkv files found in {folder}")
             sys.exit(1)
