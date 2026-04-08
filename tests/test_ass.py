@@ -6,10 +6,14 @@ from unittest.mock import patch
 import pytest
 import pysubs2
 
+from PIL import Image
+
 from v2a.ass import (
     MAX_SUBTITLE_MS,
     MIN_SUBTITLE_MS,
+    _bbox_is_fullframe,
     alignment_from_area,
+    alignment_from_image,
     build_ass,
     make_style,
 )
@@ -23,7 +27,7 @@ class TestAlignmentFromArea:
     """
     DVD frame is 720x576 divided into a 3x3 grid.
     Column thresholds: left < 240, center < 480, right >= 480.
-    Row thresholds:    top  < 192, mid   < 384, bot  >= 384.
+    Row thresholds:    top < 144,  mid < 346,    bot >= 346.
 
     Numpad mapping:
       7 8 9
@@ -78,8 +82,74 @@ class TestAlignmentFromArea:
         assert alignment_from_area(230, 470, 250, 530) == 2   # bot-center
 
     def test_boundary_exactly_at_row_threshold(self):
-        # cy = 192 exactly → should be 'mid' (cy < 384 but not < 192)
+        # cy = 192 → not < 144 (top), is < 346 (mid) → mid-center
         assert alignment_from_area(200, 184, 520, 200) == 5   # mid-center
+
+
+# ---------------------------------------------------------------------------
+# _bbox_is_fullframe
+# ---------------------------------------------------------------------------
+
+class TestBboxIsFullframe:
+    def test_full_ntsc_frame_detected(self):
+        assert _bbox_is_fullframe(0, 2, 719, 479) is True
+
+    def test_small_dialogue_box_not_fullframe(self):
+        assert _bbox_is_fullframe(100, 500, 620, 540) is False
+
+    def test_none_coords_are_fullframe(self):
+        assert _bbox_is_fullframe(None, None, None, None) is True
+
+    def test_partial_none_is_fullframe(self):
+        assert _bbox_is_fullframe(0, None, 719, 479) is True
+
+    def test_wide_but_short_not_fullframe(self):
+        # Full width but only a dialogue strip — not full-frame
+        assert _bbox_is_fullframe(0, 450, 719, 530) is False
+
+
+# ---------------------------------------------------------------------------
+# alignment_from_image
+# ---------------------------------------------------------------------------
+
+def _make_frame_png(tmp_path, w, h, content_y1, content_y2, cx_frac=0.5) -> Path:
+    """Create a synthetic RGBA PNG with visible pixels in a horizontal band."""
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    cx = int(w * cx_frac)
+    half = w // 6
+    for y in range(content_y1, content_y2 + 1):
+        for x in range(cx - half, cx + half):
+            if 0 <= x < w:
+                img.putpixel((x, y), (255, 255, 255, 255))
+    path = tmp_path / "frame.png"
+    img.save(path)
+    return path
+
+
+class TestAlignmentFromImage:
+    def test_bottom_center_content(self, tmp_path):
+        # Content in the bottom 20% of a 480px frame → bot-center → an=2
+        path = _make_frame_png(tmp_path, 720, 480, 420, 460)
+        assert alignment_from_image(path) == 2
+
+    def test_top_center_content(self, tmp_path):
+        # Content in the top 10% → top-center → an=8
+        path = _make_frame_png(tmp_path, 720, 480, 10, 40)
+        assert alignment_from_image(path) == 8
+
+    def test_mid_center_content(self, tmp_path):
+        # Content in the middle → mid-center → an=5
+        path = _make_frame_png(tmp_path, 720, 480, 200, 250)
+        assert alignment_from_image(path) == 5
+
+    def test_transparent_frame_returns_2(self, tmp_path):
+        img = Image.new("RGBA", (720, 480), (0, 0, 0, 0))
+        path = tmp_path / "empty.png"
+        img.save(path)
+        assert alignment_from_image(path) == 2
+
+    def test_missing_file_returns_2(self, tmp_path):
+        assert alignment_from_image(tmp_path / "nonexistent.png") == 2
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +164,7 @@ class TestMakeStyle:
     def test_font_and_size(self):
         style = make_style()
         assert style.fontname == "Arial"
-        assert style.fontsize == 52
+        assert style.fontsize == 36
 
     def test_default_alignment_is_bottom_center(self):
         assert make_style().alignment == 2
@@ -120,13 +190,13 @@ class TestBuildAss:
     to avoid needing real .sub files.
     """
 
-    def _run(self, entries, texts, spu_results, tmp_path):
+    def _run(self, entries, texts, spu_results, tmp_path, frames=None):
         out = tmp_path / "output.ass"
         sub = tmp_path / "subs.sub"
         sub.write_bytes(b'')
         spu_iter = iter(spu_results)
         with patch("v2a.ass.read_spu_at", side_effect=lambda *_: next(spu_iter)):
-            count = build_ass(entries, texts, sub, out)
+            count = build_ass(entries, texts, sub, out, frames=frames)
         return count, out
 
     def test_writes_ass_file(self, tmp_path):
@@ -215,6 +285,35 @@ class TestBuildAss:
         _, out = self._run(entries, texts, [_spu(end_ms=2000)], tmp_path)
         subs = pysubs2.load(str(out))
         assert "\\N" in subs[0].text
+
+    def test_image_based_alignment_used_for_fullframe_bbox(self, tmp_path):
+        # Full-frame bbox (0,2)-(719,479) — should use PNG pixel analysis.
+        # Content at the bottom of the PNG → bottom-center → no {\an} tag.
+        frame = _make_frame_png(tmp_path, 720, 478, 430, 470)
+        entries = [(1000, 0x1000)]
+        texts = ["Dialogue"]
+        spu = {"end_ms": 2000, "x1": 0, "y1": 2, "x2": 719, "y2": 479}
+        out = tmp_path / "output.ass"
+        sub = tmp_path / "subs.sub"
+        sub.write_bytes(b'')
+        with patch("v2a.ass.read_spu_at", return_value=spu):
+            build_ass(entries, texts, sub, out, frames=[frame])
+        loaded = pysubs2.load(str(out))
+        assert "{\\an" not in loaded[0].text
+
+    def test_image_based_alignment_top_content(self, tmp_path):
+        # Full-frame bbox with content at the top → top-center → {\an8}.
+        frame = _make_frame_png(tmp_path, 720, 478, 10, 40)
+        entries = [(1000, 0x1000)]
+        texts = ["Title card"]
+        spu = {"end_ms": 2000, "x1": 0, "y1": 2, "x2": 719, "y2": 479}
+        out = tmp_path / "output.ass"
+        sub = tmp_path / "subs.sub"
+        sub.write_bytes(b'')
+        with patch("v2a.ass.read_spu_at", return_value=spu):
+            build_ass(entries, texts, sub, out, frames=[frame])
+        loaded = pysubs2.load(str(out))
+        assert loaded[0].text.startswith("{\\an8}")
 
     def test_default_style_is_set(self, tmp_path):
         entries = [(1000, 0x1000)]

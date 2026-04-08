@@ -45,7 +45,7 @@ def check_deps() -> None:
         sys.exit(1)
 
 
-def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool, keep_frames: bool = False) -> bool:
+def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool, keep_frames: bool = False, verbose: bool = False) -> bool:
     """
     Run the full pipeline on a single MKV file.
 
@@ -73,7 +73,8 @@ def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool
 
     print(f"  Track ID {track['mkv_id']}  |  lang={track['language']}")
 
-    out_path = mkv_path.parent / f"{mkv_path.stem}.{track['language']}.ass"
+    lang_label = lang_hint or track['language']
+    out_path = mkv_path.parent / f"{mkv_path.stem}.{lang_label}.ass"
     if not force and out_path.exists():
         print(f"  [skip] Output already exists: {out_path.name}  (use --force to overwrite)")
         return False
@@ -115,7 +116,7 @@ def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool
         texts = ocr_frames(frames)
 
         # sub_path must be read before the tempdir is cleaned up
-        count = build_ass(entries, texts, sub_path, out_path)
+        count = build_ass(entries, texts, sub_path, out_path, frames=frames, verbose=verbose)
 
         if keep_frames:
             import shutil as _shutil
@@ -153,6 +154,10 @@ def main() -> None:
         "--keep-frames", action="store_true",
         help="Save decoded subtitle frames to a frames/ subdirectory next to the output for inspection.",
     )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Print SPU bounding-box coordinates and alignment tag for each subtitle (useful for debugging positioning).",
+    )
     args = parser.parse_args()
 
     if args.dir:
@@ -167,7 +172,7 @@ def main() -> None:
         print(f"Found {len(mkv_files)} MKV file(s) in {folder.name}/")
         ok = skip = 0
         for mkv in mkv_files:
-            if process_file(mkv, args.language, batch=True, force=args.force, keep_frames=args.keep_frames):
+            if process_file(mkv, args.language, batch=True, force=args.force, keep_frames=args.keep_frames, verbose=args.verbose):
                 ok += 1
             else:
                 skip += 1
@@ -180,7 +185,7 @@ def main() -> None:
         if not mkv_path.exists():
             print(f"[error] File not found: {mkv_path}")
             sys.exit(1)
-        process_file(mkv_path, args.language, batch=False, force=args.force, keep_frames=args.keep_frames)
+        process_file(mkv_path, args.language, batch=False, force=args.force, keep_frames=args.keep_frames, verbose=args.verbose)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `v2a` converts VobSub bitmap subtitles embedded in MKV files into styled ASS subtitle files. It's a CLI tool designed for DVD backup libraries served by Jellyfin.
 
-**Pipeline:** `mkvmerge` identifies VobSub tracks → `mkvextract` pulls the `.idx`/`.sub` pair → `ffmpeg` renders bitmaps to PNGs → Tesseract OCRs each frame → `pysubs2` writes a styled `.ass` file next to the source MKV.
+**Pipeline:** `mkvmerge` identifies VobSub tracks → `mkvextract` pulls the `.idx`/`.sub` pair → SPU binary decoder renders bitmaps to PNGs → Tesseract OCRs each frame → `pysubs2` writes a styled `.ass` file next to the source MKV.
 
 ## System dependencies (must be on PATH)
 
@@ -63,7 +63,7 @@ All source lives in `src/v2a/`. Each module has a single responsibility:
 
 ### Track selection convention
 
-When multiple VobSub tracks share the same language code, `select_track()` returns the **last** one. This matches the common DVD authoring convention where the first same-language track is signs/forced-only and the last is full dialogue.
+When multiple VobSub tracks need to be disambiguated (same language code, or no language hint in batch mode), `select_track()` picks the one with the most `num_index_entries`. This reliably selects the full dialogue track over signs/credits tracks regardless of language-code labeling errors (a common DVD authoring issue where the full dialogue track gets mislabeled with the wrong language code).
 
 ## Testing notes
 

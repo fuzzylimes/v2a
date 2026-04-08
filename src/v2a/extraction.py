@@ -80,11 +80,6 @@ def extract_frames(
     frames = []
     for i, (_, filepos) in enumerate(entries, 1):
         spu_data = read_spu_bytes(sub_path, filepos)
-        if i == 1:
-            meta1 = parse_spu(spu_data)
-            print(f"  [debug] entry 1: spu_data={len(spu_data)}b  "
-                  f"bbox=({meta1['x1']},{meta1['y1']})-({meta1['x2']},{meta1['y2']})  "
-                  f"end_ms={meta1['end_ms']}")
         meta = parse_spu(spu_data)
         path = frames_dir / f"frame_{i:06d}.png"
         if None not in (meta['x1'], meta['y1'], meta['x2'], meta['y2']):

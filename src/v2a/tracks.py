@@ -25,6 +25,7 @@ def identify_vobsub_tracks(mkv_path: Path) -> list[dict]:
                 "mkv_id":   track["id"],
                 "language": props.get("language", "und"),
                 "name":     props.get("track_name", ""),
+                "entries":  props.get("num_index_entries", 0),
             })
     return tracks
 
@@ -33,11 +34,11 @@ def select_track(tracks: list[dict], lang_hint: str | None, batch: bool) -> dict
     """
     Pick a VobSub track.
 
-    Priority: language match > only-one-track > batch auto-first > interactive prompt.
+    Priority: language match > only-one-track > most-entries auto-select > interactive prompt.
 
-    When multiple tracks share the same language code the LAST one is returned.
-    This follows a common disc-authoring convention where the first same-language
-    track is signs/forced-only and the second is the full dialogue track.
+    When multiple tracks match (same language or no lang_hint in batch mode) the
+    one with the most index entries is chosen. This reliably picks the full dialogue
+    track over signs/credits tracks, regardless of language-code labeling errors.
     """
     if not tracks:
         return None
@@ -46,25 +47,43 @@ def select_track(tracks: list[dict], lang_hint: str | None, batch: bool) -> dict
         lang_hint = lang_hint.lower()
         matches = [t for t in tracks if t["language"].lower() == lang_hint]
         if matches:
+            best = max(matches, key=lambda t: t["entries"])
             if len(matches) > 1:
                 print(f"  [info] {len(matches)} tracks match language '{lang_hint}' "
-                      f"— selecting the last one (ID {matches[-1]['mkv_id']}), "
-                      "assumed to be the full dialogue track.")
-            return matches[-1]
+                      f"— selecting largest (ID {best['mkv_id']}, "
+                      f"{best['entries']} entries).")
+
+            # If another track is significantly larger, it is probably the real
+            # full-dialogue track regardless of language labeling.
+            non_matches = [t for t in tracks if t["language"].lower() != lang_hint]
+            if non_matches:
+                dominant = max(non_matches, key=lambda t: t["entries"])
+                threshold = max(best["entries"] * 3, 1)
+                if dominant["entries"] >= threshold:
+                    print(f"  [warn] Requested language '{lang_hint}' track "
+                          f"(ID {best['mkv_id']}, {best['entries']} entries) is much "
+                          f"smaller than '{dominant['language']}' track "
+                          f"(ID {dominant['mkv_id']}, {dominant['entries']} entries).")
+                    print(f"         Selecting larger track — it likely contains the "
+                          f"full subtitles. Specify -l {dominant['language']} to silence this.")
+                    return dominant
+
+            return best
         print(f"  [warn] No track matching language '{lang_hint}'.")
 
     if len(tracks) == 1:
         return tracks[0]
 
     if batch:
-        print(f"  [warn] Multiple VobSub tracks — auto-selecting first "
-              f"(ID {tracks[0]['mkv_id']}, lang={tracks[0]['language']}).")
+        best = max(tracks, key=lambda t: t["entries"])
+        print(f"  [warn] Multiple VobSub tracks — auto-selecting largest "
+              f"(ID {best['mkv_id']}, lang={best['language']}, {best['entries']} entries).")
         print("         Use -l/--language to be explicit.")
-        return tracks[0]
+        return best
 
     print("\n  VobSub subtitle tracks:")
     for i, t in enumerate(tracks):
-        label = f"    [{i}]  Track ID {t['mkv_id']}  |  lang={t['language']}"
+        label = f"    [{i}]  Track ID {t['mkv_id']}  |  lang={t['language']}  |  {t['entries']} entries"
         if t["name"]:
             label += f"  |  \"{t['name']}\""
         print(label)
