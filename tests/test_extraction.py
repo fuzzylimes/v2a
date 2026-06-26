@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from v2a.extraction import extract_frames, extract_vobsub, parse_idx
+from v2a.extraction import extract_frames, extract_pgs, extract_vobsub, parse_idx
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -109,6 +109,26 @@ class TestExtractVobsub:
         with patch("v2a.extraction.subprocess.run"):
             with pytest.raises(RuntimeError, match="expected .idx/.sub pair"):
                 extract_vobsub(tmp_path / "movie.mkv", mkv_track_id=3, out_dir=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# extract_pgs
+# ---------------------------------------------------------------------------
+
+class TestExtractPgs:
+    def test_calls_mkvextract_and_returns_sup(self, tmp_path):
+        (tmp_path / "subs.sup").touch()
+        with patch("v2a.extraction.subprocess.run") as mock_run:
+            sup = extract_pgs(tmp_path / "movie.mkv", mkv_track_id=4, out_dir=tmp_path)
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "mkvextract"
+        assert "4:" in cmd[-1]
+        assert sup == tmp_path / "subs.sup"
+
+    def test_raises_if_sup_missing(self, tmp_path):
+        with patch("v2a.extraction.subprocess.run"):
+            with pytest.raises(RuntimeError, match="expected .sup"):
+                extract_pgs(tmp_path / "movie.mkv", mkv_track_id=4, out_dir=tmp_path)
 
 
 # ---------------------------------------------------------------------------

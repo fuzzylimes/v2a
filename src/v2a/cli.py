@@ -1,6 +1,7 @@
 """
-v2a — Extract VobSub subtitles from MKV(s), OCR them with Tesseract,
-      and write a styled ASS file alongside each source video.
+v2a — Extract bitmap subtitles from MKV(s) — VobSub (DVD) or PGS (Blu-ray) —
+      OCR them with Tesseract, and write a styled ASS file alongside each
+      source video. The source type is detected automatically per track.
 
 System dependencies:
     sudo apt install mkvtoolnix ffmpeg tesseract-ocr
@@ -52,26 +53,23 @@ def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool
     Returns True if an .ass file was written, False if the file was skipped or
     an error prevented completion.
     """
-    from .tracks import identify_vobsub_tracks, select_track
-    from .extraction import extract_vobsub, parse_idx, extract_frames
-    from .ocr import ocr_frames
-    from .ass import build_ass
+    from .tracks import identify_subtitle_tracks, select_track
 
     print(f"\n{'─' * 60}")
     print(f"File : {mkv_path.name}")
 
     try:
-        tracks = identify_vobsub_tracks(mkv_path)
+        tracks = identify_subtitle_tracks(mkv_path)
     except subprocess.CalledProcessError as exc:
         print(f"  [error] mkvmerge failed: {exc}")
         return False
 
     track = select_track(tracks, lang_hint, batch)
     if track is None:
-        print("  [skip] No VobSub tracks found.")
+        print("  [skip] No VobSub or PGS subtitle tracks found.")
         return False
 
-    print(f"  Track ID {track['mkv_id']}  |  lang={track['language']}")
+    print(f"  Track ID {track['mkv_id']}  |  lang={track['language']}  |  {track['kind']}")
 
     lang_label = lang_hint or track['language']
     out_path = mkv_path.parent / f"{mkv_path.stem}.{lang_label}.ass"
@@ -81,42 +79,12 @@ def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool
 
     with tempfile.TemporaryDirectory(prefix="v2a_") as tmp:
         tmp_dir = Path(tmp)
-
-        print("  [1/4] Extracting VobSub...")
-        try:
-            idx_path, sub_path = extract_vobsub(mkv_path, track["mkv_id"], tmp_dir)
-        except (RuntimeError, subprocess.CalledProcessError) as exc:
-            print(f"  [error] Extraction failed: {exc}")
+        if track["kind"] == "pgs":
+            count = _convert_pgs(mkv_path, track, out_path, tmp_dir, verbose)
+        else:
+            count = _convert_vobsub(mkv_path, track, out_path, tmp_dir, verbose)
+        if count is None:
             return False
-
-        print("  [2/4] Parsing .idx timestamps and file positions...")
-        try:
-            entries = parse_idx(idx_path)
-        except Exception as exc:
-            print(f"  [error] Failed to parse .idx: {exc}")
-            return False
-        print(f"        {len(entries)} subtitle entries.")
-
-        print("  [3/4] Decoding subtitle bitmaps...")
-        try:
-            frames = extract_frames(idx_path, sub_path, entries, tmp_dir)
-        except Exception as exc:
-            print(f"  [error] Bitmap decoding failed: {exc}")
-            return False
-        print(f"        {len(frames)} frames rendered.")
-
-        if len(frames) != len(entries):
-            print(f"  [warn] Frame/entry mismatch ({len(frames)} vs {len(entries)}). "
-                  "Truncating to shorter list.")
-            n       = min(len(frames), len(entries))
-            frames  = frames[:n]
-            entries = entries[:n]
-
-        print("  [4/4] Running OCR...")
-        texts = ocr_frames(frames)
-
-        # sub_path must be read before the tempdir is cleaned up
-        count = build_ass(entries, texts, sub_path, out_path, frames=frames, verbose=verbose)
 
         if keep_frames:
             import shutil as _shutil
@@ -130,11 +98,84 @@ def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool
     return True
 
 
+def _convert_vobsub(mkv_path: Path, track: dict, out_path: Path,
+                    tmp_dir: Path, verbose: bool) -> int | None:
+    """Run the VobSub (DVD) pipeline. Returns the event count, or None on failure."""
+    from .extraction import extract_vobsub, parse_idx, extract_frames
+    from .ocr import ocr_frames
+    from .ass import build_ass
+
+    print("  [1/4] Extracting VobSub...")
+    try:
+        idx_path, sub_path = extract_vobsub(mkv_path, track["mkv_id"], tmp_dir)
+    except (RuntimeError, subprocess.CalledProcessError) as exc:
+        print(f"  [error] Extraction failed: {exc}")
+        return None
+
+    print("  [2/4] Parsing .idx timestamps and file positions...")
+    try:
+        entries = parse_idx(idx_path)
+    except Exception as exc:
+        print(f"  [error] Failed to parse .idx: {exc}")
+        return None
+    print(f"        {len(entries)} subtitle entries.")
+
+    print("  [3/4] Decoding subtitle bitmaps...")
+    try:
+        frames = extract_frames(idx_path, sub_path, entries, tmp_dir)
+    except Exception as exc:
+        print(f"  [error] Bitmap decoding failed: {exc}")
+        return None
+    print(f"        {len(frames)} frames rendered.")
+
+    if len(frames) != len(entries):
+        print(f"  [warn] Frame/entry mismatch ({len(frames)} vs {len(entries)}). "
+              "Truncating to shorter list.")
+        n       = min(len(frames), len(entries))
+        frames  = frames[:n]
+        entries = entries[:n]
+
+    print("  [4/4] Running OCR...")
+    texts = ocr_frames(frames)
+
+    # sub_path must be read before the tempdir is cleaned up
+    return build_ass(entries, texts, sub_path, out_path, frames=frames, verbose=verbose)
+
+
+def _convert_pgs(mkv_path: Path, track: dict, out_path: Path,
+                 tmp_dir: Path, verbose: bool) -> int | None:
+    """Run the PGS (Blu-ray) pipeline. Returns the event count, or None on failure."""
+    from .extraction import extract_pgs
+    from .pgs import parse_sup
+    from .ocr import ocr_frames
+    from .ass import build_ass_pgs
+
+    print("  [1/3] Extracting PGS...")
+    try:
+        sup_path = extract_pgs(mkv_path, track["mkv_id"], tmp_dir)
+    except (RuntimeError, subprocess.CalledProcessError) as exc:
+        print(f"  [error] Extraction failed: {exc}")
+        return None
+
+    print("  [2/3] Decoding PGS subtitle bitmaps and timing...")
+    try:
+        records = parse_sup(sup_path, tmp_dir / "frames")
+    except Exception as exc:
+        print(f"  [error] PGS decoding failed: {exc}")
+        return None
+    print(f"        {len(records)} subtitle entries.")
+
+    print("  [3/3] Running OCR...")
+    texts = ocr_frames([r["image_path"] for r in records])
+
+    return build_ass_pgs(records, texts, out_path, verbose=verbose)
+
+
 def main() -> None:
     check_deps()
 
     parser = argparse.ArgumentParser(
-        description="Convert VobSub subtitles in MKV files to styled ASS.",
+        description="Convert VobSub (DVD) or PGS (Blu-ray) subtitles in MKV files to styled ASS.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

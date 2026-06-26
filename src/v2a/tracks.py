@@ -1,16 +1,37 @@
-"""VobSub track identification and selection."""
+"""Subtitle track identification and selection (VobSub for DVD, PGS for Blu-ray)."""
 
 import json
 import subprocess
 from pathlib import Path
 
+# Map a track's codec to the pipeline that handles it, keyed by both the
+# canonical Matroska codec_id and mkvmerge's human-readable codec name. VobSub
+# comes from DVD sources; PGS (Presentation Graphic Stream) from Blu-ray.
+_CODEC_KIND = {
+    "S_VOBSUB": "vobsub",
+    "VobSub": "vobsub",
+    "S_HDMV/PGS": "pgs",
+    "HDMV PGS": "pgs",
+    "PGS": "pgs",
+}
 
-def identify_vobsub_tracks(mkv_path: Path) -> list[dict]:
+
+def _track_kind(track: dict, props: dict) -> str | None:
+    """Resolve a subtitle track's pipeline kind from its codec_id or codec name."""
+    return (_CODEC_KIND.get(props.get("codec_id", ""))
+            or _CODEC_KIND.get(track.get("codec", "")))
+
+
+def identify_subtitle_tracks(mkv_path: Path) -> list[dict]:
     """
-    Return a list of VobSub tracks found in mkv_path, each as a dict with:
+    Return the bitmap subtitle tracks v2a can convert (VobSub and PGS).
+
+    Each track is a dict with:
         mkv_id   : track ID used by mkvextract
         language : BCP-47 language code (e.g. 'eng', 'und')
         name     : human-readable track name (may be empty)
+        entries  : number of index entries (0 for PGS — not reported by mkvmerge)
+        kind     : 'vobsub' or 'pgs' — selects the extraction/decode pipeline
     """
     result = subprocess.run(
         ["mkvmerge", "--identify", "--identification-format", "json", str(mkv_path)],
@@ -19,15 +40,33 @@ def identify_vobsub_tracks(mkv_path: Path) -> list[dict]:
     data = json.loads(result.stdout)
     tracks = []
     for track in data.get("tracks", []):
-        if track.get("type") == "subtitles" and track.get("codec") == "VobSub":
-            props = track.get("properties", {})
-            tracks.append({
-                "mkv_id":   track["id"],
-                "language": props.get("language", "und"),
-                "name":     props.get("track_name", ""),
-                "entries":  props.get("num_index_entries", 0),
-            })
+        if track.get("type") != "subtitles":
+            continue
+        props = track.get("properties", {})
+        kind = _track_kind(track, props)
+        if kind is None:
+            continue
+        tracks.append({
+            "mkv_id":   track["id"],
+            "language": props.get("language", "und"),
+            "name":     props.get("track_name", ""),
+            "entries":  props.get("num_index_entries", 0),
+            "kind":     kind,
+        })
     return tracks
+
+
+def identify_vobsub_tracks(mkv_path: Path) -> list[dict]:
+    """
+    Return only the VobSub tracks found in mkv_path (DVD sources).
+
+    Kept for callers that only handle VobSub; the dicts omit the 'kind' key.
+    """
+    return [
+        {k: t[k] for k in ("mkv_id", "language", "name", "entries")}
+        for t in identify_subtitle_tracks(mkv_path)
+        if t["kind"] == "vobsub"
+    ]
 
 
 def select_track(tracks: list[dict], lang_hint: str | None, batch: bool) -> dict | None:

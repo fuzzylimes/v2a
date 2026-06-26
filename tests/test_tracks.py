@@ -6,7 +6,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from v2a.tracks import identify_vobsub_tracks, select_track
+from v2a.tracks import (
+    identify_subtitle_tracks,
+    identify_vobsub_tracks,
+    select_track,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -69,6 +73,60 @@ class TestIdentifyVobsubTracks:
         with self._mock_run(raw_tracks):
             result = identify_vobsub_tracks(tmp_path / "fake.mkv")
         assert result == [{"mkv_id": 2, "language": "und", "name": "", "entries": 0}]
+
+
+# ---------------------------------------------------------------------------
+# identify_subtitle_tracks (VobSub + PGS)
+# ---------------------------------------------------------------------------
+
+class TestIdentifySubtitleTracks:
+    def _mock_run(self, tracks_json: list[dict]):
+        stdout = json.dumps({"tracks": tracks_json})
+        return patch("v2a.tracks.subprocess.run", return_value=MagicMock(stdout=stdout))
+
+    def test_detects_vobsub_and_pgs_by_codec_id(self, tmp_path):
+        raw_tracks = [
+            {"id": 0, "type": "video", "codec": "AVC", "properties": {}},
+            {"id": 2, "type": "subtitles", "codec": "VobSub", "properties": {
+                "codec_id": "S_VOBSUB", "language": "eng", "num_index_entries": 20}},
+            {"id": 3, "type": "subtitles", "codec": "HDMV PGS", "properties": {
+                "codec_id": "S_HDMV/PGS", "language": "eng"}},
+        ]
+        with self._mock_run(raw_tracks):
+            result = identify_subtitle_tracks(tmp_path / "fake.mkv")
+        assert [t["kind"] for t in result] == ["vobsub", "pgs"]
+        assert result[1]["mkv_id"] == 3
+        assert result[1]["entries"] == 0   # PGS has no index entries
+
+    def test_pgs_detected_without_codec_id(self, tmp_path):
+        # Fall back to the human-readable codec name when codec_id is absent.
+        raw_tracks = [
+            {"id": 1, "type": "subtitles", "codec": "HDMV PGS", "properties": {
+                "language": "jpn"}},
+        ]
+        with self._mock_run(raw_tracks):
+            result = identify_subtitle_tracks(tmp_path / "fake.mkv")
+        assert result == [{"mkv_id": 1, "language": "jpn", "name": "",
+                           "entries": 0, "kind": "pgs"}]
+
+    def test_ignores_text_subtitle_tracks(self, tmp_path):
+        raw_tracks = [
+            {"id": 1, "type": "subtitles", "codec": "SubRip/SRT", "properties": {
+                "codec_id": "S_TEXT/UTF8", "language": "eng"}},
+        ]
+        with self._mock_run(raw_tracks):
+            assert identify_subtitle_tracks(tmp_path / "fake.mkv") == []
+
+    def test_vobsub_helper_excludes_pgs_and_kind_key(self, tmp_path):
+        raw_tracks = [
+            {"id": 2, "type": "subtitles", "codec": "VobSub", "properties": {
+                "codec_id": "S_VOBSUB", "language": "eng", "num_index_entries": 5}},
+            {"id": 3, "type": "subtitles", "codec": "HDMV PGS", "properties": {
+                "codec_id": "S_HDMV/PGS", "language": "eng"}},
+        ]
+        with self._mock_run(raw_tracks):
+            result = identify_vobsub_tracks(tmp_path / "fake.mkv")
+        assert result == [{"mkv_id": 2, "language": "eng", "name": "", "entries": 5}]
 
 
 # ---------------------------------------------------------------------------

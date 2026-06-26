@@ -9,12 +9,14 @@ import pysubs2
 from PIL import Image
 
 from v2a.ass import (
+    LAST_FALLBACK_MS,
     MAX_SUBTITLE_MS,
     MIN_SUBTITLE_MS,
     _bbox_is_fullframe,
     alignment_from_area,
     alignment_from_image,
     build_ass,
+    build_ass_pgs,
     make_style,
 )
 
@@ -322,3 +324,100 @@ class TestBuildAss:
         subs = pysubs2.load(str(out))
         assert "Default" in subs.styles
         assert subs.styles["Default"].fontname == "Arial"
+
+
+# ---------------------------------------------------------------------------
+# build_ass_pgs
+# ---------------------------------------------------------------------------
+
+def _rec(start_ms=1000, end_ms=3000, x1=900, y1=1000, x2=1020, y2=1050,
+         canvas_w=1920, canvas_h=1080):
+    return {"start_ms": start_ms, "end_ms": end_ms,
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "canvas_w": canvas_w, "canvas_h": canvas_h}
+
+
+class TestBuildAssPgs:
+    def _run(self, records, texts, tmp_path):
+        out = tmp_path / "output.ass"
+        count = build_ass_pgs(records, texts, out)
+        return count, out
+
+    def test_writes_file_and_counts_events(self, tmp_path):
+        count, out = self._run([_rec(), _rec()], ["One", "Two"], tmp_path)
+        assert out.exists()
+        assert count == 2
+
+    def test_empty_text_skipped(self, tmp_path):
+        count, _ = self._run([_rec(), _rec()], ["", "Visible"], tmp_path)
+        assert count == 1
+
+    def test_uses_pgs_timing_directly(self, tmp_path):
+        # PGS end time is trusted as-is — no 8s cap, unlike VobSub.
+        _, out = self._run([_rec(start_ms=0, end_ms=20_000)], ["Long"], tmp_path)
+        subs = pysubs2.load(str(out))
+        assert subs[0].start == 0
+        assert subs[0].end == 20_000
+
+    def test_min_floor_applied(self, tmp_path):
+        _, out = self._run([_rec(start_ms=1000, end_ms=1010)], ["Flash"], tmp_path)
+        subs = pysubs2.load(str(out))
+        assert subs[0].end == 1000 + MIN_SUBTITLE_MS
+
+    def test_none_end_uses_last_fallback(self, tmp_path):
+        _, out = self._run([_rec(start_ms=1000, end_ms=None)], ["Trailing"], tmp_path)
+        subs = pysubs2.load(str(out))
+        assert subs[0].end == 1000 + LAST_FALLBACK_MS
+
+    def test_exact_position_for_dialogue(self, tmp_path):
+        # Box (900,1000)-(1020,1050) → center (960, 1025) → \pos at those coords.
+        _, out = self._run([_rec(x1=900, y1=1000, x2=1020, y2=1050)], ["Dialogue"], tmp_path)
+        subs = pysubs2.load(str(out))
+        assert subs[0].text == "{\\an5\\pos(960,1025)}Dialogue"
+
+    def test_exact_position_for_raised_dialogue(self, tmp_path):
+        # Dialogue raised to the top (e.g. two speakers) is positioned exactly,
+        # not snapped to a zone — center (960, 60).
+        _, out = self._run([_rec(x1=900, y1=40, x2=1020, y2=80)], ["Up here"], tmp_path)
+        subs = pysubs2.load(str(out))
+        assert subs[0].text == "{\\an5\\pos(960,60)}Up here"
+
+    def test_no_zone_an_tags_used(self, tmp_path):
+        # The 9-zone \an2/\an8/etc. tags must not appear — only the \an5 anchor.
+        _, out = self._run([_rec(x1=0, y1=0, x2=40, y2=40)], ["Corner"], tmp_path)
+        subs = pysubs2.load(str(out))
+        assert subs[0].text.startswith("{\\an5\\pos(")
+
+    def test_playres_is_native_canvas(self, tmp_path):
+        _, out = self._run([_rec(canvas_w=1920, canvas_h=1080)], ["Hello"], tmp_path)
+        subs = pysubs2.load(str(out))
+        assert subs.info["PlayResX"] == "1920"
+        assert subs.info["PlayResY"] == "1080"
+
+    def test_font_family_and_color_preserved(self, tmp_path):
+        # "Same styling" = font/color unchanged from the DVD style.
+        _, out = self._run([_rec()], ["Hello"], tmp_path)
+        subs = pysubs2.load(str(out))
+        base = make_style()
+        assert subs.styles["Default"].fontname == base.fontname
+        assert subs.styles["Default"].primarycolor == base.primarycolor
+        assert subs.styles["Default"].outlinecolor == base.outlinecolor
+
+    def test_font_size_scaled_to_canvas(self, tmp_path):
+        # 36px @ 576h scales to 36*1080/576 = 67.5 → 68 @ 1080h.
+        _, out = self._run([_rec(canvas_h=1080)], ["Hello"], tmp_path)
+        subs = pysubs2.load(str(out))
+        assert subs.styles["Default"].fontsize == round(36 * 1080 / 576)
+
+    def test_newlines_converted(self, tmp_path):
+        _, out = self._run([_rec()], ["Line one\nLine two"], tmp_path)
+        subs = pysubs2.load(str(out))
+        assert "\\N" in subs[0].text
+
+    def test_none_bbox_falls_back_to_bottom_center(self, tmp_path):
+        # No location data → no \pos, plain bottom-center default (no \an5).
+        _, out = self._run(
+            [_rec(x1=None, y1=None, x2=None, y2=None)], ["No box"], tmp_path)
+        subs = pysubs2.load(str(out))
+        assert "\\pos" not in subs[0].text
+        assert "{\\an" not in subs[0].text

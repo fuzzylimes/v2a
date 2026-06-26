@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from v2a.ocr import ocr_frames, preprocess
+from v2a.ocr import _restore_il, ocr_frames, preprocess
 
 
 # ---------------------------------------------------------------------------
@@ -114,5 +114,45 @@ class TestOcrFrames:
             ocr_frames([frame])
 
         _, kwargs = mock_ocr.call_args
-        assert "--psm 6" in kwargs.get("config", "")
-        assert "--oem 3" in kwargs.get("config", "")
+        config = kwargs.get("config", "")
+        assert "--psm 6" in config
+        assert "--oem 3" in config
+        assert "tessedit_char_blacklist=|" in config
+
+    def test_restores_pipes_in_ocr_output(self, tmp_path):
+        """Pipes that survive the blacklist are repaired in ocr_frames output."""
+        frame = tmp_path / "frame_000001.png"
+        self._write_small_png(frame)
+
+        with patch("v2a.ocr.pytesseract.image_to_string", return_value="| wi|| go"):
+            results = ocr_frames([frame])
+
+        assert results == ["I will go"]
+
+
+# ---------------------------------------------------------------------------
+# _restore_il
+# ---------------------------------------------------------------------------
+
+class TestRestoreIl:
+    def test_standalone_pipe_becomes_capital_i(self):
+        assert _restore_il("| think so") == "I think so"
+
+    def test_pipe_before_apostrophe_becomes_capital_i(self):
+        assert _restore_il("|'m here") == "I'm here"
+        assert _restore_il("|'ll go") == "I'll go"
+
+    def test_pipe_touching_lowercase_becomes_l(self):
+        assert _restore_il("wi|| do") == "will do"
+        assert _restore_il("a||") == "all"
+        assert _restore_il("He||o") == "Hello"
+        assert _restore_il("fami|y") == "family"
+
+    def test_pipe_in_uppercase_context_defaults_to_i(self):
+        assert _restore_il("|N THE") == "IN THE"
+
+    def test_broken_bar_is_also_restored(self):
+        assert _restore_il("¦ think") == "I think"
+
+    def test_text_without_pipes_unchanged(self):
+        assert _restore_il("nothing to fix here") == "nothing to fix here"

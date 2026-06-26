@@ -1,8 +1,25 @@
-"""VobSub extraction, .idx parsing, and bitmap frame rendering."""
+"""VobSub/PGS extraction, .idx parsing, and bitmap frame rendering."""
 
 import re
 import subprocess
 from pathlib import Path
+
+
+def extract_pgs(mkv_path: Path, mkv_track_id: int, out_dir: Path) -> Path:
+    """
+    Extract a single PGS (Blu-ray) subtitle track from mkv_path into out_dir.
+
+    Produces out_dir/subs.sup. Raises RuntimeError if the file is missing
+    after extraction.
+    """
+    sup = out_dir / "subs.sup"
+    subprocess.run(
+        ["mkvextract", "tracks", str(mkv_path), f"{mkv_track_id}:{sup}"],
+        check=True, capture_output=True,
+    )
+    if not sup.exists():
+        raise RuntimeError("mkvextract did not produce the expected .sup file.")
+    return sup
 
 
 def extract_vobsub(mkv_path: Path, mkv_track_id: int, out_dir: Path) -> tuple[Path, Path]:
