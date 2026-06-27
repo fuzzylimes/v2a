@@ -50,10 +50,17 @@ def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool
     """
     Run the full pipeline on a single MKV file.
 
-    Returns True if an .ass file was written, False if the file was skipped or
-    an error prevented completion.
+    Every selected subtitle track is converted (not just one); same-language
+    tracks are disambiguated by cue count and named for Jellyfin (see
+    tracks.plan_outputs / tracks.output_filename).
+
+    Returns True if at least one .ass file was written, False if the file was
+    skipped entirely or an error prevented any output.
     """
-    from .tracks import identify_subtitle_tracks, select_track
+    from .tracks import (
+        identify_subtitle_tracks, select_tracks, plan_outputs, output_filename,
+        needs_interactive_prompt,
+    )
 
     print(f"\n{'─' * 60}")
     print(f"File : {mkv_path.name}")
@@ -64,65 +71,118 @@ def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool
         print(f"  [error] mkvmerge failed: {exc}")
         return False
 
-    track = select_track(tracks, lang_hint, batch)
-    if track is None:
+    if not tracks:
         print("  [skip] No VobSub or PGS subtitle tracks found.")
-        return False
-
-    print(f"  Track ID {track['mkv_id']}  |  lang={track['language']}  |  {track['kind']}")
-
-    lang_label = lang_hint or track['language']
-    out_path = mkv_path.parent / f"{mkv_path.stem}.{lang_label}.ass"
-    if not force and out_path.exists():
-        print(f"  [skip] Output already exists: {out_path.name}  (use --force to overwrite)")
         return False
 
     with tempfile.TemporaryDirectory(prefix="v2a_") as tmp:
         tmp_dir = Path(tmp)
-        if track["kind"] == "pgs":
-            count = _convert_pgs(mkv_path, track, out_path, tmp_dir, verbose)
+        extracted: dict[int, dict] = {}
+
+        def prepare(track: dict) -> bool:
+            """Extract a track once and record its cue count. False on failure."""
+            if track["mkv_id"] in extracted:
+                return True
+            info = _extract_and_count(mkv_path, track, tmp_dir)
+            if info is None:
+                return False
+            extracted[track["mkv_id"]] = info
+            return True
+
+        # The interactive menu shows cue counts, so when we will prompt we must
+        # extract every track up front. Otherwise we only touch the chosen set.
+        if needs_interactive_prompt(tracks, lang_hint, batch):
+            for t in tracks:
+                prepare(t)
+            chosen = select_tracks(tracks, lang_hint, batch)
         else:
-            count = _convert_vobsub(mkv_path, track, out_path, tmp_dir, verbose)
-        if count is None:
+            chosen = select_tracks(tracks, lang_hint, batch)
+            chosen = [t for t in chosen if prepare(t)]
+
+        if not chosen:
+            print("  [skip] No tracks selected.")
             return False
 
-        if keep_frames:
-            import shutil as _shutil
-            dest = out_path.parent / (out_path.stem + ".frames")
-            if dest.exists():
-                _shutil.rmtree(dest)
-            _shutil.copytree(tmp_dir / "frames", dest)
-            print(f"  Frames saved → {dest}")
+        wrote = 0
+        for p in plan_outputs(chosen):
+            info = extracted.get(p["mkv_id"])
+            if info is None:
+                continue
+            out_path = mkv_path.parent / output_filename(
+                mkv_path.stem, p["lang"], p["title"], p["flags"])
 
-    print(f"  Done  →  {out_path.name}  ({count} events written)")
-    return True
+            print(f"\n  Track ID {p['mkv_id']}  |  lang={p['language']}  |  "
+                  f"{p['kind']}  |  {p.get('count', 0)} cues  →  {out_path.name}")
+
+            if not force and out_path.exists():
+                print(f"  [skip] Output already exists (use --force to overwrite).")
+                continue
+
+            if info["kind"] == "pgs":
+                count = _convert_pgs(info["sup"], out_path, info["dir"], verbose)
+            else:
+                count = _convert_vobsub(info["idx"], info["sub"], out_path, info["dir"], verbose)
+            if count is None:
+                continue
+
+            if keep_frames:
+                _save_frames(info["dir"], out_path)
+
+            print(f"  Done  →  {out_path.name}  ({count} events written)")
+            wrote += 1
+
+    return wrote > 0
 
 
-def _convert_vobsub(mkv_path: Path, track: dict, out_path: Path,
-                    tmp_dir: Path, verbose: bool) -> int | None:
-    """Run the VobSub (DVD) pipeline. Returns the event count, or None on failure."""
-    from .extraction import extract_vobsub, parse_idx, extract_frames
+def _extract_and_count(mkv_path: Path, track: dict, tmp_dir: Path) -> dict | None:
+    """
+    Extract one track into its own subdir and record its cue count on the track.
+
+    Returns a dict describing the extracted files (keys: kind, dir, and either
+    'sup' or 'idx'/'sub'), or None on extraction failure. Sets track['count'].
+    """
+    from .extraction import extract_pgs, extract_vobsub, parse_idx
+    from .pgs import count_sup
+
+    track_dir = tmp_dir / f"track_{track['mkv_id']}"
+    track_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        if track["kind"] == "pgs":
+            sup = extract_pgs(mkv_path, track["mkv_id"], track_dir)
+            track["count"] = count_sup(sup)
+            return {"kind": "pgs", "dir": track_dir, "sup": sup}
+        idx, sub = extract_vobsub(mkv_path, track["mkv_id"], track_dir)
+        track["count"] = len(parse_idx(idx))
+        return {"kind": "vobsub", "dir": track_dir, "idx": idx, "sub": sub}
+    except (RuntimeError, subprocess.CalledProcessError) as exc:
+        print(f"  [error] Extraction failed for track {track['mkv_id']}: {exc}")
+        return None
+
+
+def _save_frames(track_dir: Path, out_path: Path) -> None:
+    """Copy a track's decoded frames next to its output for inspection."""
+    import shutil as _shutil
+    src = track_dir / "frames"
+    if not src.exists():
+        return
+    dest = out_path.parent / (out_path.stem + ".frames")
+    if dest.exists():
+        _shutil.rmtree(dest)
+    _shutil.copytree(src, dest)
+    print(f"  Frames saved → {dest}")
+
+
+def _convert_vobsub(idx_path: Path, sub_path: Path, out_path: Path,
+                    track_dir: Path, verbose: bool) -> int | None:
+    """Run the VobSub (DVD) pipeline on already-extracted files. Returns event count or None."""
+    from .extraction import parse_idx, extract_frames
     from .ocr import ocr_frames
     from .ass import build_ass
 
-    print("  [1/4] Extracting VobSub...")
-    try:
-        idx_path, sub_path = extract_vobsub(mkv_path, track["mkv_id"], tmp_dir)
-    except (RuntimeError, subprocess.CalledProcessError) as exc:
-        print(f"  [error] Extraction failed: {exc}")
-        return None
-
-    print("  [2/4] Parsing .idx timestamps and file positions...")
+    print("  [1/3] Parsing .idx and decoding subtitle bitmaps...")
     try:
         entries = parse_idx(idx_path)
-    except Exception as exc:
-        print(f"  [error] Failed to parse .idx: {exc}")
-        return None
-    print(f"        {len(entries)} subtitle entries.")
-
-    print("  [3/4] Decoding subtitle bitmaps...")
-    try:
-        frames = extract_frames(idx_path, sub_path, entries, tmp_dir)
+        frames = extract_frames(idx_path, sub_path, entries, track_dir)
     except Exception as exc:
         print(f"  [error] Bitmap decoding failed: {exc}")
         return None
@@ -135,39 +195,33 @@ def _convert_vobsub(mkv_path: Path, track: dict, out_path: Path,
         frames  = frames[:n]
         entries = entries[:n]
 
-    print("  [4/4] Running OCR...")
+    print("  [2/3] Running OCR...")
     texts = ocr_frames(frames)
 
+    print("  [3/3] Writing ASS...")
     # sub_path must be read before the tempdir is cleaned up
     return build_ass(entries, texts, sub_path, out_path, frames=frames, verbose=verbose)
 
 
-def _convert_pgs(mkv_path: Path, track: dict, out_path: Path,
-                 tmp_dir: Path, verbose: bool) -> int | None:
-    """Run the PGS (Blu-ray) pipeline. Returns the event count, or None on failure."""
-    from .extraction import extract_pgs
+def _convert_pgs(sup_path: Path, out_path: Path,
+                 track_dir: Path, verbose: bool) -> int | None:
+    """Run the PGS (Blu-ray) pipeline on an already-extracted .sup. Returns event count or None."""
     from .pgs import parse_sup
     from .ocr import ocr_frames
     from .ass import build_ass_pgs
 
-    print("  [1/3] Extracting PGS...")
+    print("  [1/3] Decoding PGS subtitle bitmaps and timing...")
     try:
-        sup_path = extract_pgs(mkv_path, track["mkv_id"], tmp_dir)
-    except (RuntimeError, subprocess.CalledProcessError) as exc:
-        print(f"  [error] Extraction failed: {exc}")
-        return None
-
-    print("  [2/3] Decoding PGS subtitle bitmaps and timing...")
-    try:
-        records = parse_sup(sup_path, tmp_dir / "frames")
+        records = parse_sup(sup_path, track_dir / "frames")
     except Exception as exc:
         print(f"  [error] PGS decoding failed: {exc}")
         return None
     print(f"        {len(records)} subtitle entries.")
 
-    print("  [3/3] Running OCR...")
+    print("  [2/3] Running OCR...")
     texts = ocr_frames([r["image_path"] for r in records])
 
+    print("  [3/3] Writing ASS...")
     return build_ass_pgs(records, texts, out_path, verbose=verbose)
 
 

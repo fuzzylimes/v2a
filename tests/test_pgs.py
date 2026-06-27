@@ -17,6 +17,7 @@ from v2a.pgs import (
     SEG_PDS,
     _decode_rle,
     _ycrcb_to_rgb,
+    count_sup,
     parse_sup,
 )
 
@@ -217,3 +218,36 @@ class TestParseSup:
     def test_empty_stream_returns_no_records(self, tmp_path):
         sup = self._write(tmp_path, b"")
         assert parse_sup(sup, tmp_path / "frames") == []
+
+
+# ---------------------------------------------------------------------------
+# count_sup
+# ---------------------------------------------------------------------------
+
+class TestCountSup:
+    def _write(self, tmp_path, data: bytes):
+        sup = tmp_path / "subs.sup"
+        sup.write_bytes(data)
+        return sup
+
+    def test_counts_single_subtitle(self, tmp_path):
+        sup = self._write(tmp_path, _simple_sup())
+        assert count_sup(sup) == 1
+
+    def test_counts_multiple_subtitles(self, tmp_path):
+        sup = self._write(
+            tmp_path,
+            _simple_sup(start_ms=1000, end_ms=2000)
+            + _simple_sup(x=200, y=100, start_ms=4000, end_ms=6000),
+        )
+        assert count_sup(sup) == 2
+
+    def test_clear_only_display_sets_not_counted(self, tmp_path):
+        # A lone clear (empty PCS) must not count as a subtitle appearance.
+        clear = (_segment(SEG_PCS, _pcs([], state=0x00), 5000)
+                 + _segment(SEG_END, b"", 5000))
+        sup = self._write(tmp_path, _simple_sup() + clear)
+        assert count_sup(sup) == 1
+
+    def test_empty_stream_counts_zero(self, tmp_path):
+        assert count_sup(self._write(tmp_path, b"")) == 0

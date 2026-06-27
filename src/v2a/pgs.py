@@ -265,6 +265,29 @@ def _process_display_set(ds: list, palettes: dict, objects: dict):
     return pcs, pcs_pts
 
 
+def count_sup(sup_path: Path) -> int:
+    """
+    Count the number of subtitle appearances in a ``.sup`` file — cheaply.
+
+    This is the PGS equivalent of VobSub's ``num_index_entries``: it walks the
+    segment stream and counts display sets whose PCS carries objects (each marks
+    a subtitle going on screen), skipping the RLE decode and PNG rendering that
+    :func:`parse_sup` does. Used to rank same-language tracks (largest = full
+    dialogue) and to populate the interactive track-selection menu.
+    """
+    data = sup_path.read_bytes()
+    count = 0
+    ds: list = []
+    for _pts_ms, seg_type, payload in _iter_segments(data):
+        if seg_type != SEG_END:
+            ds.append((seg_type, payload))
+            continue
+        if any(t == SEG_PCS and _parse_pcs(p)["objects"] for t, p in ds):
+            count += 1
+        ds = []
+    return count
+
+
 def parse_sup(sup_path: Path, frames_dir: Path) -> list[dict]:
     """
     Parse a PGS ``.sup`` file into rendered subtitle records.
