@@ -3,15 +3,19 @@
 import re
 from pathlib import Path
 
-from PIL import Image, ImageEnhance, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 import pytesseract
 
 # DVD-only preprocessing knobs. DVD subtitle strips are tiny, soft, and cropped
 # tight to the glyphs, which is exactly what makes the tall I/l/1/[ shapes blur
 # together. PGS (Blu-ray) strips are already sharp and high-resolution, so they
 # skip this path (preprocess(dvd=False)).
-_DVD_UPSCALE = 4        # vs 3x for PGS — more detail for the LSTM to read serifs
+_DVD_UPSCALE = 5        # vs 3x for PGS — more pixels keep thin stems (I/l/1) and
+                        # the gap before an apostrophe from collapsing on binarize
 _QUIET_ZONE_PX = 20     # blank margin so no glyph touches the image edge
+# Re-crisp edges after the LANCZOS upscale softens them, so thin strokes survive
+# thresholding instead of eroding away. Applied to the DVD path only.
+_DVD_UNSHARP = ImageFilter.UnsharpMask(radius=2, percent=150, threshold=2)
 
 
 def _otsu_threshold(img: Image.Image) -> int:
@@ -61,10 +65,13 @@ def preprocess(img: Image.Image, dvd: bool = False) -> Image.Image:
          recognition at native resolution.
       5. Boost contrast.
 
-    With ``dvd=True`` (VobSub / DVD), three extra steps fight the soft, tightly
-    cropped, low-resolution glyphs that make tall shapes (``I l 1 [ |``) blur
-    together at the source:
-      * a larger 4x upscale (vs 3x) for more serif detail;
+    With ``dvd=True`` (VobSub / DVD), extra steps fight the soft, tightly cropped,
+    low-resolution glyphs that make tall shapes (``I l 1 [ |``) blur together — and
+    that drop the thin ``I`` before an apostrophe — at the source:
+      * a larger 5x upscale (vs 3x) so thin stems and the gap before an apostrophe
+        keep enough pixels to survive thresholding;
+      * an unsharp pass after the upscale to re-crisp the edges LANCZOS softened,
+        so thin strokes binarize cleanly instead of eroding;
       * an adaptive Otsu threshold instead of a fixed 128 cutoff, so dim or bright
         strips still binarize without eroding thin stems;
       * a blank quiet-zone border so no glyph sits flush against the image edge
@@ -87,6 +94,9 @@ def preprocess(img: Image.Image, dvd: bool = False) -> Image.Image:
     if not dvd:
         return enhanced.point(lambda x: 255 if x > 128 else 0)
 
+    # Re-crisp the upscaled edges so thin stems (I/l/1) and the apostrophe gap
+    # survive the threshold instead of bleeding/eroding.
+    enhanced = enhanced.filter(_DVD_UNSHARP)
     thresh = _otsu_threshold(enhanced)
     # Invert: bright subtitle pixels → black text on a white background.
     binary = enhanced.point(lambda x: 0 if x > thresh else 255)
@@ -247,6 +257,26 @@ def _restore_brackets(text: str) -> str:
     return _MASK.sub(lambda m: protected[int(m.group(1))], repaired)
 
 
+# A contraction suffix (``'ll`` ``'ve`` ``'m`` ``'d``) stranded at the start of a
+# word — no letter/digit in front of the apostrophe. Tesseract sometimes drops
+# the lone tall ``I`` before the apostrophe entirely (``I'll`` → ``'ll``), and
+# unlike a misread glyph there is nothing left for the run-repairs above to fix.
+# Both the straight and typographic apostrophe are matched. ``'re``/``'s`` are
+# excluded: a stranded one is ambiguous (``we're``/``it's``), whereas ``'ll`` etc.
+# standing alone are overwhelmingly the pronoun ``I``.
+_STRANDED_CONTRACTION = re.compile(r"(?<![\w'’])(['’])(ll|ve|m|d)\b", re.IGNORECASE)
+
+
+def _restore_contraction(text: str) -> str:
+    """
+    Recover a dropped leading ``I`` on a stranded contraction (``'ll`` → ``I'll``).
+
+    Only fires when the contraction has no word attached in front of it, so real
+    contractions (``we'll``, ``they've``, ``it's``) are left untouched.
+    """
+    return _STRANDED_CONTRACTION.sub(lambda m: "I" + m.group(1) + m.group(2), text)
+
+
 def ocr_frames(frame_paths: list[Path], dvd: bool = False) -> list[str]:
     """
     OCR each frame PNG and return a list of text strings (one per frame).
@@ -266,6 +296,7 @@ def ocr_frames(frame_paths: list[Path], dvd: bool = False) -> list[str]:
         raw = _restore_slash(raw)
         raw = _restore_one(raw)
         raw = _restore_brackets(raw)
+        raw = _restore_contraction(raw)
         raw = re.sub(r"[ \t]{2,}", " ",  raw)
         raw = re.sub(r"\n{3,}",   "\n", raw)
         results.append(raw)

@@ -6,8 +6,8 @@ from unittest.mock import patch
 from PIL import Image
 
 from v2a.ocr import (
-    _otsu_threshold, _restore_brackets, _restore_il, _restore_one,
-    _restore_slash, ocr_frames, preprocess,
+    _otsu_threshold, _restore_brackets, _restore_contraction, _restore_il,
+    _restore_one, _restore_slash, ocr_frames, preprocess,
 )
 
 
@@ -66,10 +66,10 @@ class TestPreprocessDvd:
             img.putpixel((x, 20), (255, 255, 255, 255))
         return img
 
-    def test_upscales_4x_plus_border(self):
+    def test_upscales_5x_plus_border(self):
         result = preprocess(self._strip(240, 80), dvd=True)
-        # 240*4 + 2*20 border, 80*4 + 2*20 border
-        assert result.size == (240 * 4 + 40, 80 * 4 + 40)
+        # 240*5 + 2*20 border, 80*5 + 2*20 border
+        assert result.size == (240 * 5 + 40, 80 * 5 + 40)
 
     def test_output_is_pure_black_and_white(self):
         result = preprocess(self._strip(), dvd=True)
@@ -235,6 +235,37 @@ class TestRestoreSlash:
 
     def test_text_without_slashes_unchanged(self):
         assert _restore_slash("nothing to fix") == "nothing to fix"
+
+
+# ---------------------------------------------------------------------------
+# _restore_contraction
+# ---------------------------------------------------------------------------
+
+class TestRestoreContraction:
+    def test_stranded_suffix_gets_leading_i(self):
+        assert _restore_contraction("'ll be there") == "I'll be there"
+        assert _restore_contraction("'ve seen it") == "I've seen it"
+        assert _restore_contraction("'m fine") == "I'm fine"
+        assert _restore_contraction("'d rather not") == "I'd rather not"
+
+    def test_mid_sentence_stranded_suffix(self):
+        assert _restore_contraction("Well, 'll go") == "Well, I'll go"
+
+    def test_typographic_apostrophe_supported(self):
+        assert _restore_contraction("’ll go") == "I’ll go"
+
+    def test_attached_contractions_untouched(self):
+        assert _restore_contraction("we'll go") == "we'll go"
+        assert _restore_contraction("they've seen") == "they've seen"
+        assert _restore_contraction("it's fine") == "it's fine"
+
+    def test_ambiguous_suffixes_untouched(self):
+        # 're / 's stranded are ambiguous (we're / it's), so left alone.
+        assert _restore_contraction("'re here") == "'re here"
+        assert _restore_contraction("'s mine") == "'s mine"
+
+    def test_text_without_contractions_unchanged(self):
+        assert _restore_contraction("nothing to fix") == "nothing to fix"
 
 
 # ---------------------------------------------------------------------------
