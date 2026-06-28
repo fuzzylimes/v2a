@@ -37,7 +37,7 @@ def identify_subtitle_tracks(mkv_path: Path) -> list[dict]:
     """
     result = subprocess.run(
         ["mkvmerge", "--identify", "--identification-format", "json", str(mkv_path)],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, timeout=120,
     )
     data = json.loads(result.stdout)
     tracks = []

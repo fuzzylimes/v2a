@@ -65,8 +65,13 @@ def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool
     print(f"\n{'─' * 60}")
     print(f"File : {mkv_path.name}")
 
+    print("  Identifying subtitle tracks (mkvmerge --identify)...")
     try:
         tracks = identify_subtitle_tracks(mkv_path)
+    except subprocess.TimeoutExpired:
+        print("  [error] mkvmerge --identify timed out — file may be unreadable "
+              "or on a stalled mount. Skipping.")
+        return False
     except subprocess.CalledProcessError as exc:
         print(f"  [error] mkvmerge failed: {exc}")
         return False
@@ -74,6 +79,10 @@ def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool
     if not tracks:
         print("  [skip] No VobSub or PGS subtitle tracks found.")
         return False
+
+    summary = ", ".join(
+        f"ID {t['mkv_id']} ({t['kind']}/{t['language']})" for t in tracks)
+    print(f"  Found {len(tracks)} bitmap subtitle track(s): {summary}")
 
     with tempfile.TemporaryDirectory(prefix="v2a_") as tmp:
         tmp_dir = Path(tmp)
@@ -92,6 +101,8 @@ def process_file(mkv_path: Path, lang_hint: str | None, batch: bool, force: bool
         # The interactive menu shows cue counts, so when we will prompt we must
         # extract every track up front. Otherwise we only touch the chosen set.
         if needs_interactive_prompt(tracks, lang_hint, batch):
+            print(f"  Extracting all {len(tracks)} track(s) up front to count cues "
+                  "for the selection menu...")
             for t in tracks:
                 prepare(t)
             chosen = select_tracks(tracks, lang_hint, batch)
@@ -146,17 +157,30 @@ def _extract_and_count(mkv_path: Path, track: dict, tmp_dir: Path) -> dict | Non
 
     track_dir = tmp_dir / f"track_{track['mkv_id']}"
     track_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  Extracting track {track['mkv_id']} ({track['kind']}) "
+          "with mkvextract... (this can take a minute on large files)")
     try:
         if track["kind"] == "pgs":
             sup = extract_pgs(mkv_path, track["mkv_id"], track_dir)
             track["count"] = count_sup(sup)
-            return {"kind": "pgs", "dir": track_dir, "sup": sup}
-        idx, sub = extract_vobsub(mkv_path, track["mkv_id"], track_dir)
-        track["count"] = len(parse_idx(idx))
-        return {"kind": "vobsub", "dir": track_dir, "idx": idx, "sub": sub}
+            info = {"kind": "pgs", "dir": track_dir, "sup": sup}
+        else:
+            idx, sub = extract_vobsub(mkv_path, track["mkv_id"], track_dir)
+            track["count"] = len(parse_idx(idx))
+            info = {"kind": "vobsub", "dir": track_dir, "idx": idx, "sub": sub}
+    except subprocess.TimeoutExpired:
+        print(f"  [error] mkvextract timed out for track {track['mkv_id']} — skipping.")
+        return None
     except (RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"  [error] Extraction failed for track {track['mkv_id']}: {exc}")
         return None
+
+    if track["count"] == 0:
+        print(f"  [warn] Track {track['mkv_id']} extracted but has 0 cues "
+              "(empty subtitle stream).")
+    else:
+        print(f"        Track {track['mkv_id']}: {track['count']} cues.")
+    return info
 
 
 def _save_frames(track_dir: Path, out_path: Path) -> None:
