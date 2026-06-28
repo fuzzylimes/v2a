@@ -3,19 +3,16 @@
 import re
 from pathlib import Path
 
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 
 # DVD-only preprocessing knobs. DVD subtitle strips are tiny, soft, and cropped
 # tight to the glyphs, which is exactly what makes the tall I/l/1/[ shapes blur
 # together. PGS (Blu-ray) strips are already sharp and high-resolution, so they
 # skip this path (preprocess(dvd=False)).
-_DVD_UPSCALE = 5        # vs 3x for PGS — more pixels keep thin stems (I/l/1) and
-                        # the gap before an apostrophe from collapsing on binarize
+_DVD_UPSCALE = 5        # vs 3x for PGS — more pixels for thin stems (I/l/1) without
+                        # the shape distortion an unsharp pass introduced
 _QUIET_ZONE_PX = 20     # blank margin so no glyph touches the image edge
-# Re-crisp edges after the LANCZOS upscale softens them, so thin strokes survive
-# thresholding instead of eroding away. Applied to the DVD path only.
-_DVD_UNSHARP = ImageFilter.UnsharpMask(radius=2, percent=150, threshold=2)
 
 
 def _otsu_threshold(img: Image.Image) -> int:
@@ -65,13 +62,10 @@ def preprocess(img: Image.Image, dvd: bool = False) -> Image.Image:
          recognition at native resolution.
       5. Boost contrast.
 
-    With ``dvd=True`` (VobSub / DVD), extra steps fight the soft, tightly cropped,
-    low-resolution glyphs that make tall shapes (``I l 1 [ |``) blur together — and
-    that drop the thin ``I`` before an apostrophe — at the source:
-      * a larger 5x upscale (vs 3x) so thin stems and the gap before an apostrophe
-        keep enough pixels to survive thresholding;
-      * an unsharp pass after the upscale to re-crisp the edges LANCZOS softened,
-        so thin strokes binarize cleanly instead of eroding;
+    With ``dvd=True`` (VobSub / DVD), three extra steps fight the soft, tightly
+    cropped, low-resolution glyphs that make tall shapes (``I l 1 [ |``) blur
+    together at the source:
+      * a larger 5x upscale (vs 3x) for more pixels on thin stems;
       * an adaptive Otsu threshold instead of a fixed 128 cutoff, so dim or bright
         strips still binarize without eroding thin stems;
       * a blank quiet-zone border so no glyph sits flush against the image edge
@@ -94,9 +88,6 @@ def preprocess(img: Image.Image, dvd: bool = False) -> Image.Image:
     if not dvd:
         return enhanced.point(lambda x: 255 if x > 128 else 0)
 
-    # Re-crisp the upscaled edges so thin stems (I/l/1) and the apostrophe gap
-    # survive the threshold instead of bleeding/eroding.
-    enhanced = enhanced.filter(_DVD_UNSHARP)
     thresh = _otsu_threshold(enhanced)
     # Invert: bright subtitle pixels → black text on a white background.
     binary = enhanced.point(lambda x: 0 if x > thresh else 255)
