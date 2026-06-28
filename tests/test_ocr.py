@@ -66,10 +66,10 @@ class TestPreprocessDvd:
             img.putpixel((x, 20), (255, 255, 255, 255))
         return img
 
-    def test_upscales_5x_plus_border(self):
+    def test_upscales_4x_plus_border(self):
         result = preprocess(self._strip(240, 80), dvd=True)
-        # 240*5 + 2*20 border, 80*5 + 2*20 border
-        assert result.size == (240 * 5 + 40, 80 * 5 + 40)
+        # 240*4 + 2*20 border, 80*4 + 2*20 border
+        assert result.size == (240 * 4 + 40, 80 * 4 + 40)
 
     def test_output_is_pure_black_and_white(self):
         result = preprocess(self._strip(), dvd=True)

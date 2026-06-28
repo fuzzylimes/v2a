@@ -10,8 +10,7 @@ import pytesseract
 # tight to the glyphs, which is exactly what makes the tall I/l/1/[ shapes blur
 # together. PGS (Blu-ray) strips are already sharp and high-resolution, so they
 # skip this path (preprocess(dvd=False)).
-_DVD_UPSCALE = 5        # vs 3x for PGS — more pixels for thin stems (I/l/1) without
-                        # the shape distortion an unsharp pass introduced
+_DVD_UPSCALE = 4        # vs 3x for PGS — more detail for the LSTM to read serifs
 _QUIET_ZONE_PX = 20     # blank margin so no glyph touches the image edge
 
 
@@ -65,7 +64,7 @@ def preprocess(img: Image.Image, dvd: bool = False) -> Image.Image:
     With ``dvd=True`` (VobSub / DVD), three extra steps fight the soft, tightly
     cropped, low-resolution glyphs that make tall shapes (``I l 1 [ |``) blur
     together at the source:
-      * a larger 5x upscale (vs 3x) for more pixels on thin stems;
+      * a larger 4x upscale (vs 3x) for more serif detail;
       * an adaptive Otsu threshold instead of a fixed 128 cutoff, so dim or bright
         strips still binarize without eroding thin stems;
       * a blank quiet-zone border so no glyph sits flush against the image edge
