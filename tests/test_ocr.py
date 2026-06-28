@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from v2a.ocr import _restore_il, ocr_frames, preprocess
+from v2a.ocr import _restore_il, _restore_one, ocr_frames, preprocess
 
 
 # ---------------------------------------------------------------------------
@@ -95,10 +95,10 @@ class TestOcrFrames:
         frame = tmp_path / "frame_000001.png"
         self._write_small_png(frame)
 
-        with patch("v2a.ocr.pytesseract.image_to_string", return_value="Line1\n\n\nLine2"):
+        with patch("v2a.ocr.pytesseract.image_to_string", return_value="First\n\n\nSecond"):
             results = ocr_frames([frame])
 
-        assert results == ["Line1\nLine2"]
+        assert results == ["First\nSecond"]
 
     def test_empty_frame_list_returns_empty_list(self):
         with patch("v2a.ocr.pytesseract.image_to_string") as mock_ocr:
@@ -156,3 +156,40 @@ class TestRestoreIl:
 
     def test_text_without_pipes_unchanged(self):
         assert _restore_il("nothing to fix here") == "nothing to fix here"
+
+
+# ---------------------------------------------------------------------------
+# _restore_one
+# ---------------------------------------------------------------------------
+
+class TestRestoreOne:
+    def test_word_start_one_becomes_capital_i(self):
+        assert _restore_one("1s it me") == "Is it me"
+        assert _restore_one("1t works") == "It works"
+        assert _restore_one("1f only") == "If only"
+
+    def test_one_before_apostrophe_becomes_capital_i(self):
+        assert _restore_one("1'm here") == "I'm here"
+        assert _restore_one("1'll go") == "I'll go"
+
+    def test_one_after_lowercase_becomes_l(self):
+        assert _restore_one("wi11 do") == "will do"
+        assert _restore_one("fee1") == "feel"
+        assert _restore_one("rea11y") == "really"
+
+    def test_one_in_uppercase_context_becomes_i(self):
+        assert _restore_one("1N THE") == "IN THE"
+
+    def test_standalone_digit_left_untouched(self):
+        assert _restore_one("Take 1") == "Take 1"
+        assert _restore_one("1 of 3") == "1 of 3"
+
+    def test_numbers_left_untouched(self):
+        assert _restore_one("1080p video") == "1080p video"
+        assert _restore_one("year 2016") == "year 2016"
+
+    def test_ordinal_left_untouched(self):
+        assert _restore_one("the 1st time") == "the 1st time"
+
+    def test_text_without_ones_unchanged(self):
+        assert _restore_one("nothing to fix") == "nothing to fix"
