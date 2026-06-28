@@ -220,7 +220,7 @@ def _convert_vobsub(idx_path: Path, sub_path: Path, out_path: Path,
         entries = entries[:n]
 
     print("  [2/3] Running OCR...")
-    texts = ocr_frames(frames)
+    texts = ocr_frames(frames, dvd=True)
 
     print("  [3/3] Writing ASS...")
     # sub_path must be read before the tempdir is cleaned up

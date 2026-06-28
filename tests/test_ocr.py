@@ -5,7 +5,10 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from v2a.ocr import _restore_il, _restore_one, ocr_frames, preprocess
+from v2a.ocr import (
+    _otsu_threshold, _restore_brackets, _restore_il, _restore_one,
+    ocr_frames, preprocess,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +55,52 @@ class TestPreprocess:
         result = preprocess(img)
         pixels = list(result.tobytes())
         assert all(p > 200 for p in pixels)
+
+
+class TestPreprocessDvd:
+    """The DVD path (dvd=True) adds a 4x upscale, Otsu binarize, and a border."""
+
+    def _strip(self, width=240, height=80) -> Image.Image:
+        img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        for x in range(10, 50):
+            img.putpixel((x, 20), (255, 255, 255, 255))
+        return img
+
+    def test_upscales_4x_plus_border(self):
+        result = preprocess(self._strip(240, 80), dvd=True)
+        # 240*4 + 2*20 border, 80*4 + 2*20 border
+        assert result.size == (240 * 4 + 40, 80 * 4 + 40)
+
+    def test_output_is_pure_black_and_white(self):
+        result = preprocess(self._strip(), dvd=True)
+        assert set(result.tobytes()) <= {0, 255}
+
+    def test_border_is_white_background(self):
+        result = preprocess(self._strip(), dvd=True)
+        # Inverted output: background (incl. quiet-zone border) is white.
+        assert result.getpixel((0, 0)) == 255
+        assert result.getpixel((result.width - 1, result.height - 1)) == 255
+
+    def test_text_is_black_on_white(self):
+        """The bright subtitle stroke should become black (0) after inversion."""
+        result = preprocess(self._strip(), dvd=True)
+        pixels = set(result.tobytes())
+        assert 0 in pixels and 255 in pixels   # both ink and background present
+
+
+class TestOtsuThreshold:
+    def test_all_black_returns_default(self):
+        img = Image.new("L", (10, 10), 0)
+        assert _otsu_threshold(img) == 128
+
+    def test_splits_bimodal_image(self):
+        """A 50/50 black-and-white image: threshold falls between the two peaks."""
+        img = Image.new("L", (10, 10), 0)
+        for y in range(5):
+            for x in range(10):
+                img.putpixel((x, y), 255)
+        t = _otsu_threshold(img)
+        assert 0 <= t < 255
 
 
 # ---------------------------------------------------------------------------
@@ -193,3 +242,34 @@ class TestRestoreOne:
 
     def test_text_without_ones_unchanged(self):
         assert _restore_one("nothing to fix") == "nothing to fix"
+
+
+# ---------------------------------------------------------------------------
+# _restore_brackets
+# ---------------------------------------------------------------------------
+
+class TestRestoreBrackets:
+    def test_bracket_before_apostrophe_becomes_capital_i(self):
+        assert _restore_brackets("]'m here") == "I'm here"
+        assert _restore_brackets("['ll go") == "I'll go"
+
+    def test_word_start_bracket_becomes_capital_i(self):
+        assert _restore_brackets("]t works") == "It works"
+        assert _restore_brackets("]s it me") == "Is it me"
+
+    def test_bracket_after_lowercase_becomes_l(self):
+        assert _restore_brackets("wi]] do") == "will do"
+        assert _restore_brackets("fee]") == "feel"
+
+    def test_standalone_bracket_becomes_i(self):
+        assert _restore_brackets("] think so") == "I think so"
+
+    def test_sound_cue_pair_is_preserved(self):
+        assert _restore_brackets("[ Honking ]") == "[ Honking ]"
+        assert _restore_brackets("[Sighs]") == "[Sighs]"
+
+    def test_sound_cue_preserved_alongside_repair(self):
+        assert _restore_brackets("[ Door creaks ] ]t's late") == "[ Door creaks ] It's late"
+
+    def test_text_without_brackets_unchanged(self):
+        assert _restore_brackets("nothing to fix") == "nothing to fix"
