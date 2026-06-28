@@ -94,13 +94,14 @@ def preprocess(img: Image.Image, dvd: bool = False) -> Image.Image:
     return ImageOps.expand(binary, border=_QUIET_ZONE_PX, fill=255)
 
 
-# Tesseract config. `tessedit_char_blacklist=|` stops the engine from ever
-# emitting a pipe — the tall vertical glyph shared by `I` and `l` is the most
-# common VobSub misread — forcing it to choose a real letter by glyph shape.
-_TESS_CONFIG = "--psm 6 --oem 3 -c tessedit_char_blacklist=|¦"
+# Tesseract config. We deliberately do NOT blacklist the pipe `|`: with the LSTM
+# engine (`--oem 3`) a blacklist doesn't reliably substitute a real letter for a
+# tall vertical stroke — it often drops the glyph entirely, swallowing a leading
+# `I` (e.g. `I'll` → `'ll`). Letting the pipe through and repairing it in
+# `_restore_il` is deterministic and never loses a character.
+_TESS_CONFIG = "--psm 6 --oem 3"
 
-# Runs of one or more pipe characters that survived the blacklist (older
-# Tesseract LSTM builds don't always honor char_blacklist).
+# Runs of one or more pipe characters Tesseract emitted for a tall `I`/`l`.
 _PIPE_RUN = re.compile(r"[|¦]+")
 
 
@@ -109,10 +110,11 @@ def _restore_il(text: str) -> str:
     Replace any leftover pipe characters with `I` or `l` from context.
 
     The glyph is genuinely ambiguous, so we use the dominant English cases:
-      * A standalone pipe (non-letters on both sides) is the pronoun ``I``.
       * A pipe before an apostrophe (``|'m``, ``|'ll``) is ``I``.
-      * A pipe touching a lowercase letter is ``l`` (``wi|| -> will``).
-      * Anything else (uppercase-only context) defaults to ``I``.
+      * A pipe *following* a lowercase letter is ``l`` — mid/end of a word
+        (``wi|| -> will``, ``fami|y -> family``).
+      * Anything else — word start (``|s -> Is``), all-caps (``|N -> IN``), or
+        standalone (the pronoun ``I``) — is ``I``.
     """
     def repl(m: re.Match) -> str:
         s = m.string
@@ -121,13 +123,36 @@ def _restore_il(text: str) -> str:
         n = len(m.group())
         if nxt == "'":
             return "I" * n
-        prev_lower = prev.isalpha() and prev.islower()
-        next_lower = nxt.isalpha() and nxt.islower()
-        if prev_lower or next_lower:
+        if prev.isalpha() and prev.islower():
             return "l" * n
         return "I" * n
 
     return _PIPE_RUN.sub(repl, text)
+
+
+# A forward slash Tesseract emitted for a standalone `I` (``/ am`` for ``I am``).
+# Only a slash with no alphanumeric neighbour is touched, so legitimate uses
+# (``and/or``, ``24/7``, ``km/h``) are left alone.
+_SLASH_RUN = re.compile(r"/+")
+
+
+def _restore_slash(text: str) -> str:
+    """
+    Repair a standalone ``/`` that should be the pronoun ``I`` (``/ am`` → ``I am``).
+
+    The slash is only converted when neither side is alphanumeric — covering the
+    standalone pronoun and the contraction form (``/'ll`` → ``I'll``) — so real
+    slashes inside words or numbers (``and/or``, ``24/7``) are preserved.
+    """
+    def repl(m: re.Match) -> str:
+        s = m.string
+        prev = s[m.start() - 1] if m.start() > 0 else ""
+        nxt = s[m.end()] if m.end() < len(s) else ""
+        if prev.isalnum() or nxt.isalnum():
+            return m.group()
+        return "I"
+
+    return _SLASH_RUN.sub(repl, text)
 
 
 # Runs of the digit '1' Tesseract emitted where a tall I/l was meant. Unlike the
@@ -238,6 +263,7 @@ def ocr_frames(frame_paths: list[Path], dvd: bool = False) -> list[str]:
         img = preprocess(Image.open(fp), dvd=dvd)
         raw = pytesseract.image_to_string(img, config=_TESS_CONFIG).strip()
         raw = _restore_il(raw)
+        raw = _restore_slash(raw)
         raw = _restore_one(raw)
         raw = _restore_brackets(raw)
         raw = re.sub(r"[ \t]{2,}", " ",  raw)

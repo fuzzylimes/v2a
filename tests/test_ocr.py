@@ -7,7 +7,7 @@ from PIL import Image
 
 from v2a.ocr import (
     _otsu_threshold, _restore_brackets, _restore_il, _restore_one,
-    ocr_frames, preprocess,
+    _restore_slash, ocr_frames, preprocess,
 )
 
 
@@ -166,7 +166,9 @@ class TestOcrFrames:
         config = kwargs.get("config", "")
         assert "--psm 6" in config
         assert "--oem 3" in config
-        assert "tessedit_char_blacklist=|" in config
+        # The pipe is intentionally NOT blacklisted — blacklisting drops the
+        # glyph (losing a leading I); we emit it and repair it in _restore_il.
+        assert "tessedit_char_blacklist" not in config
 
     def test_restores_pipes_in_ocr_output(self, tmp_path):
         """Pipes that survive the blacklist are repaired in ocr_frames output."""
@@ -197,6 +199,11 @@ class TestRestoreIl:
         assert _restore_il("He||o") == "Hello"
         assert _restore_il("fami|y") == "family"
 
+    def test_pipe_at_word_start_becomes_capital_i(self):
+        assert _restore_il("|s it me") == "Is it me"
+        assert _restore_il("|t works") == "It works"
+        assert _restore_il("|f only") == "If only"
+
     def test_pipe_in_uppercase_context_defaults_to_i(self):
         assert _restore_il("|N THE") == "IN THE"
 
@@ -205,6 +212,29 @@ class TestRestoreIl:
 
     def test_text_without_pipes_unchanged(self):
         assert _restore_il("nothing to fix here") == "nothing to fix here"
+
+
+# ---------------------------------------------------------------------------
+# _restore_slash
+# ---------------------------------------------------------------------------
+
+class TestRestoreSlash:
+    def test_standalone_slash_becomes_capital_i(self):
+        assert _restore_slash("/ am here") == "I am here"
+        assert _restore_slash("So / said") == "So I said"
+
+    def test_slash_before_apostrophe_becomes_capital_i(self):
+        assert _restore_slash("/'ll go") == "I'll go"
+
+    def test_slash_inside_word_is_preserved(self):
+        assert _restore_slash("and/or") == "and/or"
+        assert _restore_slash("km/h") == "km/h"
+
+    def test_slash_between_numbers_is_preserved(self):
+        assert _restore_slash("24/7") == "24/7"
+
+    def test_text_without_slashes_unchanged(self):
+        assert _restore_slash("nothing to fix") == "nothing to fix"
 
 
 # ---------------------------------------------------------------------------
