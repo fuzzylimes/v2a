@@ -5,7 +5,10 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from v2a.ocr import ocr_frames, preprocess
+from v2a.ocr import (
+    _otsu_threshold, _restore_brackets, _restore_contraction, _restore_il,
+    _restore_one, _restore_slash, ocr_frames, preprocess,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +57,52 @@ class TestPreprocess:
         assert all(p > 200 for p in pixels)
 
 
+class TestPreprocessDvd:
+    """The DVD path (dvd=True) adds a 4x upscale, Otsu binarize, and a border."""
+
+    def _strip(self, width=240, height=80) -> Image.Image:
+        img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        for x in range(10, 50):
+            img.putpixel((x, 20), (255, 255, 255, 255))
+        return img
+
+    def test_upscales_4x_plus_border(self):
+        result = preprocess(self._strip(240, 80), dvd=True)
+        # 240*4 + 2*20 border, 80*4 + 2*20 border
+        assert result.size == (240 * 4 + 40, 80 * 4 + 40)
+
+    def test_output_is_pure_black_and_white(self):
+        result = preprocess(self._strip(), dvd=True)
+        assert set(result.tobytes()) <= {0, 255}
+
+    def test_border_is_white_background(self):
+        result = preprocess(self._strip(), dvd=True)
+        # Inverted output: background (incl. quiet-zone border) is white.
+        assert result.getpixel((0, 0)) == 255
+        assert result.getpixel((result.width - 1, result.height - 1)) == 255
+
+    def test_text_is_black_on_white(self):
+        """The bright subtitle stroke should become black (0) after inversion."""
+        result = preprocess(self._strip(), dvd=True)
+        pixels = set(result.tobytes())
+        assert 0 in pixels and 255 in pixels   # both ink and background present
+
+
+class TestOtsuThreshold:
+    def test_all_black_returns_default(self):
+        img = Image.new("L", (10, 10), 0)
+        assert _otsu_threshold(img) == 128
+
+    def test_splits_bimodal_image(self):
+        """A 50/50 black-and-white image: threshold falls between the two peaks."""
+        img = Image.new("L", (10, 10), 0)
+        for y in range(5):
+            for x in range(10):
+                img.putpixel((x, y), 255)
+        t = _otsu_threshold(img)
+        assert 0 <= t < 255
+
+
 # ---------------------------------------------------------------------------
 # ocr_frames
 # ---------------------------------------------------------------------------
@@ -95,10 +144,10 @@ class TestOcrFrames:
         frame = tmp_path / "frame_000001.png"
         self._write_small_png(frame)
 
-        with patch("v2a.ocr.pytesseract.image_to_string", return_value="Line1\n\n\nLine2"):
+        with patch("v2a.ocr.pytesseract.image_to_string", return_value="First\n\n\nSecond"):
             results = ocr_frames([frame])
 
-        assert results == ["Line1\nLine2"]
+        assert results == ["First\nSecond"]
 
     def test_empty_frame_list_returns_empty_list(self):
         with patch("v2a.ocr.pytesseract.image_to_string") as mock_ocr:
@@ -114,5 +163,174 @@ class TestOcrFrames:
             ocr_frames([frame])
 
         _, kwargs = mock_ocr.call_args
-        assert "--psm 6" in kwargs.get("config", "")
-        assert "--oem 3" in kwargs.get("config", "")
+        config = kwargs.get("config", "")
+        assert "--psm 6" in config
+        assert "--oem 3" in config
+        # The pipe is intentionally NOT blacklisted — blacklisting drops the
+        # glyph (losing a leading I); we emit it and repair it in _restore_il.
+        assert "tessedit_char_blacklist" not in config
+
+    def test_restores_pipes_in_ocr_output(self, tmp_path):
+        """Pipes that survive the blacklist are repaired in ocr_frames output."""
+        frame = tmp_path / "frame_000001.png"
+        self._write_small_png(frame)
+
+        with patch("v2a.ocr.pytesseract.image_to_string", return_value="| wi|| go"):
+            results = ocr_frames([frame])
+
+        assert results == ["I will go"]
+
+
+# ---------------------------------------------------------------------------
+# _restore_il
+# ---------------------------------------------------------------------------
+
+class TestRestoreIl:
+    def test_standalone_pipe_becomes_capital_i(self):
+        assert _restore_il("| think so") == "I think so"
+
+    def test_pipe_before_apostrophe_becomes_capital_i(self):
+        assert _restore_il("|'m here") == "I'm here"
+        assert _restore_il("|'ll go") == "I'll go"
+
+    def test_pipe_touching_lowercase_becomes_l(self):
+        assert _restore_il("wi|| do") == "will do"
+        assert _restore_il("a||") == "all"
+        assert _restore_il("He||o") == "Hello"
+        assert _restore_il("fami|y") == "family"
+
+    def test_pipe_at_word_start_becomes_capital_i(self):
+        assert _restore_il("|s it me") == "Is it me"
+        assert _restore_il("|t works") == "It works"
+        assert _restore_il("|f only") == "If only"
+
+    def test_pipe_in_uppercase_context_defaults_to_i(self):
+        assert _restore_il("|N THE") == "IN THE"
+
+    def test_broken_bar_is_also_restored(self):
+        assert _restore_il("¦ think") == "I think"
+
+    def test_text_without_pipes_unchanged(self):
+        assert _restore_il("nothing to fix here") == "nothing to fix here"
+
+
+# ---------------------------------------------------------------------------
+# _restore_slash
+# ---------------------------------------------------------------------------
+
+class TestRestoreSlash:
+    def test_standalone_slash_becomes_capital_i(self):
+        assert _restore_slash("/ am here") == "I am here"
+        assert _restore_slash("So / said") == "So I said"
+
+    def test_slash_before_apostrophe_becomes_capital_i(self):
+        assert _restore_slash("/'ll go") == "I'll go"
+
+    def test_slash_inside_word_is_preserved(self):
+        assert _restore_slash("and/or") == "and/or"
+        assert _restore_slash("km/h") == "km/h"
+
+    def test_slash_between_numbers_is_preserved(self):
+        assert _restore_slash("24/7") == "24/7"
+
+    def test_text_without_slashes_unchanged(self):
+        assert _restore_slash("nothing to fix") == "nothing to fix"
+
+
+# ---------------------------------------------------------------------------
+# _restore_contraction
+# ---------------------------------------------------------------------------
+
+class TestRestoreContraction:
+    def test_stranded_suffix_gets_leading_i(self):
+        assert _restore_contraction("'ll be there") == "I'll be there"
+        assert _restore_contraction("'ve seen it") == "I've seen it"
+        assert _restore_contraction("'m fine") == "I'm fine"
+        assert _restore_contraction("'d rather not") == "I'd rather not"
+
+    def test_mid_sentence_stranded_suffix(self):
+        assert _restore_contraction("Well, 'll go") == "Well, I'll go"
+
+    def test_typographic_apostrophe_supported(self):
+        assert _restore_contraction("’ll go") == "I’ll go"
+
+    def test_attached_contractions_untouched(self):
+        assert _restore_contraction("we'll go") == "we'll go"
+        assert _restore_contraction("they've seen") == "they've seen"
+        assert _restore_contraction("it's fine") == "it's fine"
+
+    def test_ambiguous_suffixes_untouched(self):
+        # 're / 's stranded are ambiguous (we're / it's), so left alone.
+        assert _restore_contraction("'re here") == "'re here"
+        assert _restore_contraction("'s mine") == "'s mine"
+
+    def test_text_without_contractions_unchanged(self):
+        assert _restore_contraction("nothing to fix") == "nothing to fix"
+
+
+# ---------------------------------------------------------------------------
+# _restore_one
+# ---------------------------------------------------------------------------
+
+class TestRestoreOne:
+    def test_word_start_one_becomes_capital_i(self):
+        assert _restore_one("1s it me") == "Is it me"
+        assert _restore_one("1t works") == "It works"
+        assert _restore_one("1f only") == "If only"
+
+    def test_one_before_apostrophe_becomes_capital_i(self):
+        assert _restore_one("1'm here") == "I'm here"
+        assert _restore_one("1'll go") == "I'll go"
+
+    def test_one_after_lowercase_becomes_l(self):
+        assert _restore_one("wi11 do") == "will do"
+        assert _restore_one("fee1") == "feel"
+        assert _restore_one("rea11y") == "really"
+
+    def test_one_in_uppercase_context_becomes_i(self):
+        assert _restore_one("1N THE") == "IN THE"
+
+    def test_standalone_digit_left_untouched(self):
+        assert _restore_one("Take 1") == "Take 1"
+        assert _restore_one("1 of 3") == "1 of 3"
+
+    def test_numbers_left_untouched(self):
+        assert _restore_one("1080p video") == "1080p video"
+        assert _restore_one("year 2016") == "year 2016"
+
+    def test_ordinal_left_untouched(self):
+        assert _restore_one("the 1st time") == "the 1st time"
+
+    def test_text_without_ones_unchanged(self):
+        assert _restore_one("nothing to fix") == "nothing to fix"
+
+
+# ---------------------------------------------------------------------------
+# _restore_brackets
+# ---------------------------------------------------------------------------
+
+class TestRestoreBrackets:
+    def test_bracket_before_apostrophe_becomes_capital_i(self):
+        assert _restore_brackets("]'m here") == "I'm here"
+        assert _restore_brackets("['ll go") == "I'll go"
+
+    def test_word_start_bracket_becomes_capital_i(self):
+        assert _restore_brackets("]t works") == "It works"
+        assert _restore_brackets("]s it me") == "Is it me"
+
+    def test_bracket_after_lowercase_becomes_l(self):
+        assert _restore_brackets("wi]] do") == "will do"
+        assert _restore_brackets("fee]") == "feel"
+
+    def test_standalone_bracket_becomes_i(self):
+        assert _restore_brackets("] think so") == "I think so"
+
+    def test_sound_cue_pair_is_preserved(self):
+        assert _restore_brackets("[ Honking ]") == "[ Honking ]"
+        assert _restore_brackets("[Sighs]") == "[Sighs]"
+
+    def test_sound_cue_preserved_alongside_repair(self):
+        assert _restore_brackets("[ Door creaks ] ]t's late") == "[ Door creaks ] It's late"
+
+    def test_text_without_brackets_unchanged(self):
+        assert _restore_brackets("nothing to fix") == "nothing to fix"

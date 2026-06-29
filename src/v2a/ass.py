@@ -61,6 +61,38 @@ def _bbox_is_fullframe(x1, y1, x2, y2) -> bool:
     return (x2 - x1 + 1) >= _FULLFRAME_MIN_W and (y2 - y1 + 1) >= _FULLFRAME_MIN_H
 
 
+def _zone_alignment(cx: float, cy: float, width: float, height: float) -> int:
+    """
+    Map a centroid in a frame of (width, height) to an ASS \\an numpad value.
+
+    The frame is divided into a 3x3 zone grid (proportional, so it works for any
+    source resolution):
+      Row thresholds:    top < h/4,  mid < 3h/5,  bot >= 3h/5.
+      Column thresholds: left < w/3, center < 2w/3, right >= 2w/3.
+
+    Numpad mapping:  7 8 9 / 4 5 6 / 1 2 3.
+    """
+    if cy < height / 4:
+        vert = 'top'
+    elif cy < height * 3 / 5:
+        vert = 'mid'
+    else:
+        vert = 'bot'
+
+    if cx < width / 3:
+        horiz = 'left'
+    elif cx < 2 * width / 3:
+        horiz = 'center'
+    else:
+        horiz = 'right'
+
+    return {
+        ('top', 'left'): 7, ('top', 'center'): 8, ('top', 'right'): 9,
+        ('mid', 'left'): 4, ('mid', 'center'): 5, ('mid', 'right'): 6,
+        ('bot', 'left'): 1, ('bot', 'center'): 2, ('bot', 'right'): 3,
+    }[(vert, horiz)]
+
+
 def alignment_from_area(x1, y1, x2, y2) -> int:
     """
     Map a subtitle bounding box to an ASS \\an numpad value (1–9).
@@ -78,26 +110,7 @@ def alignment_from_area(x1, y1, x2, y2) -> int:
 
     cx = (x1 + x2) / 2
     cy = (y1 + y2) / 2
-
-    if cy < DVD_HEIGHT / 4:
-        vert = 'top'
-    elif cy < DVD_HEIGHT * 3 / 5:
-        vert = 'mid'
-    else:
-        vert = 'bot'
-
-    if cx < DVD_WIDTH / 3:
-        horiz = 'left'
-    elif cx < 2 * DVD_WIDTH / 3:
-        horiz = 'center'
-    else:
-        horiz = 'right'
-
-    return {
-        ('top', 'left'): 7, ('top', 'center'): 8, ('top', 'right'): 9,
-        ('mid', 'left'): 4, ('mid', 'center'): 5, ('mid', 'right'): 6,
-        ('bot', 'left'): 1, ('bot', 'center'): 2, ('bot', 'right'): 3,
-    }[(vert, horiz)]
+    return _zone_alignment(cx, cy, DVD_WIDTH, DVD_HEIGHT)
 
 
 def alignment_from_image(img_path: Path) -> int:
@@ -122,26 +135,7 @@ def alignment_from_image(img_path: Path) -> int:
         cx = (bbox[0] + bbox[2]) / 2
         cy = (bbox[1] + bbox[3]) / 2
         w, h = img.size
-
-        if cy < h / 4:
-            vert = 'top'
-        elif cy < h * 3 / 5:
-            vert = 'mid'
-        else:
-            vert = 'bot'
-
-        if cx < w / 3:
-            horiz = 'left'
-        elif cx < 2 * w / 3:
-            horiz = 'center'
-        else:
-            horiz = 'right'
-
-        return {
-            ('top', 'left'): 7, ('top', 'center'): 8, ('top', 'right'): 9,
-            ('mid', 'left'): 4, ('mid', 'center'): 5, ('mid', 'right'): 6,
-            ('bot', 'left'): 1, ('bot', 'center'): 2, ('bot', 'right'): 3,
-        }[(vert, horiz)]
+        return _zone_alignment(cx, cy, w, h)
     except Exception:
         return 2
 
@@ -209,12 +203,94 @@ def build_ass(
             print(f"    [{i:4d}] bbox=({spu['x1']},{spu['y1']})-({spu['x2']},{spu['y2']})  "
                   f"an={an} [{method}]  {text[:40]!r}")
 
-        body = text.replace("\n", "\\N")
-        if an != 2:
-            body = f"{{\\an{an}}}{body}"
-
         subs.events.append(pysubs2.SSAEvent(
-            start=start_ms, end=end_ms, text=body))
+            start=start_ms, end=end_ms, text=_event_text(text, an)))
 
     subs.save(str(output_path))
     return len(subs.events)
+
+
+def _event_text(text: str, an: int) -> str:
+    """Convert OCR text to an ASS event body, prepending an \\an tag for non-default zones."""
+    body = text.replace("\n", "\\N")
+    if an != 2:                       # \an2 is the style default — no override needed
+        body = f"{{\\an{an}}}{body}"
+    return body
+
+
+def build_ass_pgs(
+    records:     list[dict],
+    texts:       list[str],
+    output_path: Path,
+    verbose:     bool = False,
+) -> int:
+    """
+    Assemble an SSAFile from PGS (Blu-ray) subtitle records and OCR texts.
+
+    Unlike VobSub, PGS carries reliable start *and* end times (from the
+    presentation and clear composition segments), so timing is taken directly
+    from each record — only the MIN_SUBTITLE_MS floor is applied, and the 8s cap
+    / STP_DSP fallback chain used for DVD sources are not needed. A trailing
+    subtitle the stream never clears (end_ms is None) falls back to LAST_FALLBACK_MS.
+
+    Positioning is exact: PGS records carry each subtitle's real on-screen
+    bounding box, so every event is anchored at its box center with
+    ``{\\an5\\pos(cx,cy)}`` against the native canvas (declared as PlayRes). This
+    reproduces the disc's placement for dialogue, raised dialogue, and signs
+    alike — none of the 9-zone bucketing the DVD path needs. A record with no
+    box (a blank/failed render) falls back to the style's bottom-center default.
+
+    Styling matches the DVD look: same font family, colors, and outline/shadow,
+    with the size-related metrics scaled proportionally to the taller canvas so
+    subtitles appear the same on-screen size as DVD output.
+
+    Returns the number of events written.
+    """
+    canvas_w = records[0]["canvas_w"] if records else 1920
+    canvas_h = records[0]["canvas_h"] if records else 1080
+
+    subs = pysubs2.SSAFile()
+    subs.info["PlayResX"] = str(canvas_w)
+    subs.info["PlayResY"] = str(canvas_h)
+    subs.styles["Default"] = _scaled_style(canvas_h)
+
+    for i, (rec, text) in enumerate(zip(records, texts)):
+        if not text:
+            continue
+
+        start_ms = rec["start_ms"]
+        end_ms = rec["end_ms"]
+        if end_ms is None:
+            end_ms = start_ms + LAST_FALLBACK_MS
+        end_ms = max(end_ms, start_ms + MIN_SUBTITLE_MS)
+
+        body = text.replace("\n", "\\N")
+        x1, y1, x2, y2 = rec["x1"], rec["y1"], rec["x2"], rec["y2"]
+        if None not in (x1, y1, x2, y2):
+            cx, cy = round((x1 + x2) / 2), round((y1 + y2) / 2)
+            body = f"{{\\an5\\pos({cx},{cy})}}{body}"
+            if verbose:
+                print(f"    [{i:4d}] pos=({cx},{cy}) on {canvas_w}x{canvas_h}  {text[:40]!r}")
+        elif verbose:
+            print(f"    [{i:4d}] no box — bottom-center  {text[:40]!r}")
+
+        subs.events.append(pysubs2.SSAEvent(start=start_ms, end=end_ms, text=body))
+
+    subs.save(str(output_path))
+    return len(subs.events)
+
+
+def _scaled_style(canvas_h: int) -> pysubs2.SSAStyle:
+    """
+    Return the Default style scaled for a canvas of height `canvas_h`.
+
+    make_style() is tuned for the 576px-tall DVD frame. Size-related metrics
+    (fontsize, outline, shadow) scale linearly with canvas height so 1080p
+    Blu-ray output looks the same on screen; font, colors, and weight are kept.
+    """
+    style = make_style()
+    scale = canvas_h / DVD_HEIGHT
+    style.fontsize = round(style.fontsize * scale)
+    style.outline = round(style.outline * scale, 1)
+    style.shadow = round(style.shadow * scale, 1)
+    return style

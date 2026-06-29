@@ -1,8 +1,29 @@
-"""VobSub extraction, .idx parsing, and bitmap frame rendering."""
+"""VobSub/PGS extraction, .idx parsing, and bitmap frame rendering."""
 
 import re
 import subprocess
 from pathlib import Path
+
+# Upper bound for a single mkvextract call. Generous enough for full-length
+# Blu-ray PGS streams, but prevents a stalled extraction from hanging forever.
+EXTRACT_TIMEOUT_S = 600
+
+
+def extract_pgs(mkv_path: Path, mkv_track_id: int, out_dir: Path) -> Path:
+    """
+    Extract a single PGS (Blu-ray) subtitle track from mkv_path into out_dir.
+
+    Produces out_dir/subs.sup. Raises RuntimeError if the file is missing
+    after extraction.
+    """
+    sup = out_dir / "subs.sup"
+    subprocess.run(
+        ["mkvextract", "tracks", str(mkv_path), f"{mkv_track_id}:{sup}"],
+        check=True, capture_output=True, timeout=EXTRACT_TIMEOUT_S,
+    )
+    if not sup.exists():
+        raise RuntimeError("mkvextract did not produce the expected .sup file.")
+    return sup
 
 
 def extract_vobsub(mkv_path: Path, mkv_track_id: int, out_dir: Path) -> tuple[Path, Path]:
@@ -14,7 +35,7 @@ def extract_vobsub(mkv_path: Path, mkv_track_id: int, out_dir: Path) -> tuple[Pa
     """
     subprocess.run(
         ["mkvextract", "tracks", str(mkv_path), f"{mkv_track_id}:{out_dir / 'subs'}"],
-        check=True, capture_output=True,
+        check=True, capture_output=True, timeout=EXTRACT_TIMEOUT_S,
     )
     idx, sub = out_dir / "subs.idx", out_dir / "subs.sub"
     if not idx.exists() or not sub.exists():

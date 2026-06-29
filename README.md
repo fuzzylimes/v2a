@@ -1,8 +1,12 @@
 # v2a
 
-Convert VobSub bitmap subtitles embedded in MKV files into styled ASS subtitle files. Designed for DVD backup libraries served by Jellyfin.
+Convert bitmap subtitles embedded in MKV files into styled ASS subtitle files. Handles both **VobSub** (DVD) and **PGS** (Blu-ray) sources, and is designed for disc backup libraries served by Jellyfin.
 
-**Pipeline:** `mkvmerge` identifies tracks → `mkvextract` pulls the `.idx`/`.sub` pair → `ffmpeg` renders bitmaps → Tesseract OCRs each frame → `pysubs2` writes a styled `.ass` file next to the source MKV.
+**VobSub pipeline (DVD):** `mkvmerge` identifies tracks → `mkvextract` pulls the `.idx`/`.sub` pair → the SPU decoder renders bitmaps → DVD-specific image cleanup (4× upscale, adaptive threshold, quiet-zone border, black-on-white inversion) → Tesseract OCRs each frame → `pysubs2` writes a styled `.ass` file next to the source MKV.
+
+**PGS pipeline (Blu-ray):** `mkvmerge` identifies tracks → `mkvextract` pulls a `.sup` file → the PGS decoder renders each subtitle and reads its exact timing and on-screen position → Tesseract OCRs each frame → `pysubs2` writes the same styled `.ass`.
+
+The source type is detected automatically per track, so the same commands work for either; you don't need to specify which kind of disc the MKV came from.
 
 ## Requirements
 
@@ -48,7 +52,7 @@ pip install -e .
 v2a movie.mkv
 ```
 
-If the file has multiple VobSub tracks, you'll be prompted to choose one.
+If the file has multiple subtitle tracks (VobSub or PGS), you'll be prompted to choose one.
 
 ### Single file with language hint
 
@@ -56,7 +60,7 @@ If the file has multiple VobSub tracks, you'll be prompted to choose one.
 v2a movie.mkv -l eng
 ```
 
-Auto-selects the track matching the given language code. If multiple tracks match, picks the last one (convention: first track is usually signs-only, last is full dialogue).
+Auto-selects the track matching the given language code. If multiple tracks match, picks the one with the most subtitle entries — typically the full dialogue track rather than a signs/forced track.
 
 ### Batch — process a full season folder
 
@@ -89,7 +93,7 @@ v2a -d DIR [-r] [-l LANG] [--force] [--keep-frames] [--verbose]
 | `-l`, `--language LANG` | Language code for auto track selection (e.g. `eng`, `en`) |
 | `--force` | Re-process and overwrite existing `.ass` files (default: skip) |
 | `--keep-frames` | Save decoded subtitle bitmaps to a `.frames/` folder next to the output (useful for inspection) |
-| `--verbose` | Print bounding-box coordinates and alignment tag for each subtitle (useful for debugging positioning) |
+| `--verbose` | Print per-subtitle positioning info (VobSub: bounding box + `\an` zone; PGS: `\pos` coordinates) — useful for debugging placement |
 
 `FILE` and `-d`/`--dir` are mutually exclusive; one is required.
 
@@ -107,8 +111,16 @@ Jellyfin automatically picks up external subtitle files in this format.
 
 ## Notes
 
-- **Track selection:** When a language has multiple VobSub tracks, v2a picks the last one. This matches the common DVD convention where the first track contains signs/forced subtitles and the last contains full dialogue.
-- **End times:** Derived from the SPU packet's own stop timestamp when available; falls back to next-subtitle-start minus 100 ms, then a 3-second fixed duration. A hard cap of 8 seconds prevents frozen text across scene breaks.
-- **Sign positioning:** Non-bottom-center subtitles (signs, titles) get an `\an` override tag based on their position in the DVD frame, placing them in the correct screen zone.
-- **OCR quality:** Tesseract accuracy can degrade on italicized or stylized fonts. A review pass is recommended before treating the output as final.
+- **Source detection:** VobSub (DVD) and PGS (Blu-ray) tracks are detected automatically per track, and each is processed by its own pipeline. Output naming and font styling are identical for both.
+- **Track selection:** When several tracks share a language, v2a selects the one with the most subtitle entries — reliably the full dialogue track rather than a signs/forced track, even when DVD authoring mislabels the language code. (PGS tracks don't report an entry count, so selection there relies on the language hint.)
+- **End times:**
+  - *VobSub:* derived from the SPU packet's own stop timestamp when available; falls back to next-subtitle-start minus 100 ms, then a 3-second fixed duration. A hard cap of 8 seconds prevents frozen text across scene breaks.
+  - *PGS:* taken directly from the stream's presentation/clear timing, which is reliable — only a 500 ms floor is applied (no 8-second cap).
+- **Positioning:**
+  - *VobSub:* the DVD frame is divided into a 3×3 zone grid and each subtitle is mapped to the nearest `\an` anchor — a workaround for VobSub's frequently-unusable position data.
+  - *PGS:* every line is placed at its exact on-screen coordinates with `\pos()`, faithfully reproducing the disc's layout (bottom dialogue, raised dialogue, signs). Font sizing scales with the 1080p canvas so it matches the DVD on-screen size.
+- **OCR quality:** Tesseract accuracy can degrade on italicized or stylized fonts.
+  - *DVD preprocessing:* VobSub strips are tiny and soft, so they get extra cleanup before OCR — a 4× upscale (more serif detail for the recognizer), an adaptive Otsu threshold (preserves thin stems on dim/bright strips), a quiet-zone border (Tesseract reads edge-touching glyphs poorly), and inversion to black-on-white (Tesseract's preferred polarity). PGS (Blu-ray) is already sharp and skips this path.
+  - *Misread repair:* the tall, near-identical glyphs `I`, `l`, `1`, `/`, `[`/`]`, and `|`/`¦` are the most common bitmap-OCR confusions. Leftover ones are corrected from context (e.g. `]'m` → `I'm`, `wi11` → `will`, `1t` → `It`, `/ am` → `I am`), and a stranded contraction whose `I` Tesseract dropped is rebuilt (`'ll` → `I'll`) — while real numbers, slashes (`and/or`), and sound-cue brackets like `[ Honking ]` are left intact. A review pass is still recommended before treating the output as final.
+- **Progress & robustness:** the early stages (track identification, extraction, cue counting) now print what they're doing, so a slow `mkvextract` on a large file no longer looks like a hang. Each external tool call has a timeout, and a track that yields no subtitles is reported and skipped rather than stalling the run.
 - **Batch scope:** `-d` processes a flat folder by default. Add `-r`/`--recursive` to walk all subdirectories, e.g. when pointing at a full show library.
